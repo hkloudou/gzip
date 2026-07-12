@@ -186,25 +186,25 @@ Level 6, each op is a full compression (reset + deflate + CRC + gzip framing); e
 
 | Input | C++ Native | CGO | Pure Go | Std Go | Pure Go / CGO | Pure Go / Std Go |
 |---|---|---|---|---|---|---|
-| 2 B | 1.9 µs/op | 2.2 µs/op | 2.4 µs/op | 11.1 µs/op | 0.93× | **4.68× faster** |
-| 198 B JSON token | 7.5 µs/op | 8.0 µs/op | 8.7 µs/op | 21.2 µs/op | 0.92× | **2.45× faster** |
-| 2 KB JSON | 11.8 µs/op | 11.1 µs/op | 9.9 µs/op | 20.2 µs/op | 1.13× | **2.06× faster** |
-| 64 KB JSON | 302.2 µs (217 MB/s) | 315.6 µs (208 MB/s) | 250.6 µs (261 MB/s) | 178.8 µs (367 MB/s) | **1.26× faster** | 0.71× |
-| 1 MB JSON | 10.1 ms (104 MB/s) | 10.0 ms (105 MB/s) | 10.9 ms (96 MB/s) | 7.1 ms (147 MB/s) | 0.92× | 0.65× |
-| 1 MB random (incompressible) | 23.8 ms (44 MB/s) | 23.8 ms (44 MB/s) | 28.8 ms (36 MB/s) | 18.4 ms (57 MB/s) | 0.83× | 0.64× |
+| 2 B | 1.9 µs/op | 2.2 µs/op | 2.3 µs/op | 11.7 µs/op | 0.95× | **4.99× faster** |
+| 198 B JSON token | 7.7 µs/op | 7.9 µs/op | 8.5 µs/op | 20.8 µs/op | 0.93× | **2.45× faster** |
+| 2 KB JSON | 11.4 µs/op | 12.4 µs/op | 9.8 µs/op | 20.7 µs/op | **1.27× faster** | **2.12× faster** |
+| 64 KB JSON | 302.4 µs (217 MB/s) | 284.1 µs (231 MB/s) | 250.5 µs (262 MB/s) | 178.0 µs (368 MB/s) | 1.13× | 0.71× |
+| 1 MB JSON | 11.3 ms (93 MB/s) | 10.1 ms (104 MB/s) | 10.8 ms (97 MB/s) | 7.0 ms (149 MB/s) | 0.93× | 0.65× |
+| 1 MB random (incompressible) | 23.8 ms (44 MB/s) | 23.8 ms (44 MB/s) | 28.6 ms (37 MB/s) | 18.2 ms (58 MB/s) | 0.83× | 0.64× |
 
 **Memory** (Go heap per op; C-side buffers of the CGO column are invisible to Go heap stats; Std Go compresses into a reused bytes.Buffer while the other Go columns return a fresh exact-size slice per op):
 
 | Input | CGO | Pure Go | Std Go |
 |---|---|---|---|
-| 2 B | 32 B · 3 allocs | 48 B · 2 allocs | 0 B · 0 allocs |
-| 198 B JSON token | 404 B · 3 allocs | 234 B · 2 allocs | 0 B · 0 allocs |
-| 2 KB JSON | 180 B · 3 allocs | 124 B · 2 allocs | 0 B · 0 allocs |
-| 64 KB JSON | 580 B · 3 allocs | 354 B · 2 allocs | 0 B · 0 allocs |
-| 1 MB JSON | 272.0 KB · 3 allocs | 154.6 KB · 2 allocs | 0 B · 0 allocs |
-| 1 MB random (incompressible) | 2.0 MB · 4 allocs | 1.0 MB · 2 allocs | 0 B · 0 allocs |
+| 2 B | 32 B · 3 allocs | 49 B · 2 allocs | 0 B · 0 allocs |
+| 198 B JSON token | 404 B · 3 allocs | 233 B · 2 allocs | 0 B · 0 allocs |
+| 2 KB JSON | 180 B · 3 allocs | 120 B · 2 allocs | 0 B · 0 allocs |
+| 64 KB JSON | 580 B · 3 allocs | 355 B · 2 allocs | 0 B · 0 allocs |
+| 1 MB JSON | 272.0 KB · 3 allocs | 159.3 KB · 2 allocs | 0 B · 0 allocs |
+| 1 MB random (incompressible) | 2.0 MB · 4 allocs | 1.1 MB · 2 allocs | 0 B · 0 allocs |
 
-*2026-07-12 01:32 UTC · AMD EPYC 7763 64-Core Processor · go 1.26.5 · linux/amd64 · commit `0baa0cb` (auto-updated by CI on push to main)*
+*2026-07-12 02:04 UTC · AMD EPYC 7763 64-Core Processor · go 1.26.5 · linux/amd64 · commit `973251c` (auto-updated by CI on push to main)*
 <!-- AUTOBENCH:END -->
 
 With the cgo-side compressor-stream pooling (see "Memory notes") CGO is
