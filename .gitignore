@@ -19,3 +19,6 @@ go.work.sum
 
 # local build artifacts (native reference tools etc.)
 bin/
+
+# downloaded official zlib sources (make zlib-src)
+.cache/

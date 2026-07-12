@@ -7,50 +7,43 @@ on:
   workflow_dispatch:
 
 jobs:
-  # Unit tests + C↔Go byte-for-byte cross-check (levels 0-9 × NO_FLUSH/PARTIAL/SYNC/FULL/FINISH)
-  # includes the full header-parameter tests (Name/Comment/Extra/ModTime/Mtime/OS ×
-  # real C zlib deflateSetHeader cross-check) and the cgo bounded-memory test
+  # Unit tests + real-zlib byte-for-byte cross-checks. The C reference is the
+  # gzip_ref referee subprocess, built from the OFFICIAL zlib 1.3.1 tarball
+  # (pinned SHA-256 in the Makefile) — this repository contains no zlib C
+  # code and no cgo. Covers levels 0-9 × flush types, golden vectors,
+  # streaming call sequences and streaming-output/HTTP tests, Writer
+  # behavior, all header parameters × real deflateSetHeader (deterministic
+  # matrix + seeded random fuzz), and the sync.Pool adversarial tests.
+  # On windows the referee legs skip; the pure Go legs are identical anyway.
   test:
-    name: test (${{ matrix.os }}, CGO=${{ matrix.cgo }})
+    name: test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
-        cgo: ["1", "0"]
-        # cgo on windows needs mingw; run pure Go mode only
-        include:
-          - os: windows-latest
-            cgo: "0"
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: stable
+      - name: build referee (official zlib 1.3.1, pinned SHA-256)
+        if: runner.os != 'Windows'
+        run: make native-build && ./bin/gzip_ref version
       - name: go vet
-        env:
-          CGO_ENABLED: ${{ matrix.cgo }}
         run: go vet ./...
       - name: go test
-        env:
-          CGO_ENABLED: ${{ matrix.cgo }}
         run: go test -v ./...
 
-  # Three-way consistency safety net: the outputs of C++ native (real zlib
-  # without cgo) / Go+cgo / pure Go must match byte-for-byte. The native
-  # referee is built three ways — from the OFFICIAL zlib 1.3.1 tarball
-  # (pinned SHA-256, downloaded from zlib.net / the madler/zlib release;
-  # this leg is the deterministic correct answer, fully independent of this
-  # repository's vendored copy), from the vendored sources, and against the
-  # system zlib. Before anything runs, the vendored sources are verified
-  # byte-identical to the official tarball (zlib_amalgam.c excepted), so the
-  # cgo test legs inherit the official authority too. The matrix covers:
-  # 8 corpus entries × 11 levels × flush positions, the full header-parameter
-  # matrix (Name/Comment/Extra combinations × OS × MTIME × level × 4 content
-  # shapes), and empty input.
+  # Cross-check matrix: real zlib vs pure Go, byte-for-byte. Two referee
+  # builds — from the official tarball (the deterministic correct answer,
+  # independent of this repository) and against the system zlib (on macOS
+  # that is Apple's libz, re-verifying Apple-platform compatibility every
+  # run). Matrix: 8 corpora × 11 levels × flush positions + streaming call
+  # sequences + MTIME × OS dimensions + all header parameters + empty input.
   native:
-    name: three-way cross-check (${{ matrix.os }})
+    name: cross-check matrix (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
     strategy:
@@ -62,49 +55,17 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: fetch official zlib 1.3.1 (pinned SHA-256)
+      - name: build referees (official tarball + system zlib)
         run: |
-          for url in https://zlib.net/zlib-1.3.1.tar.gz \
-                     https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz; do
-            if curl -fsSL --retry 3 -o zlib-official.tar.gz "$url"; then break; fi
-            echo "download failed from $url, trying next mirror"
-          done
-          echo "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23  zlib-official.tar.gz" | shasum -a 256 -c -
-          tar xzf zlib-official.tar.gz
-      - name: verify vendored zlib is byte-identical to the official release
-        run: |
-          status=0
-          for f in internal/czlib/zlib/*; do
-            base=$(basename "$f")
-            if [ "$base" = "zlib_amalgam.c" ]; then continue; fi
-            if ! cmp -s "$f" "zlib-1.3.1/$base"; then
-              echo "::error::vendored internal/czlib/zlib/$base differs from official zlib 1.3.1"
-              status=1
-            fi
-          done
-          exit $status
-      - name: build native reference (official tarball + vendored + system zlib)
-        run: |
-          mkdir -p bin
-          (cd zlib-1.3.1 && ./configure --static >/dev/null && make -s libz.a)
-          c++ -O2 -std=c++17 native/gzip_ref.cpp zlib-1.3.1/libz.a -Izlib-1.3.1 -o bin/gzip_ref_official
-          cc  -O2 -c internal/czlib/zlib/zlib_amalgam.c -o bin/zlib_amalgam.o -Iinternal/czlib/zlib
-          c++ -O2 -std=c++17 native/gzip_ref.cpp bin/zlib_amalgam.o -Iinternal/czlib/zlib -o bin/gzip_ref
-          c++ -O2 -std=c++17 native/gzip_ref.cpp -lz -o bin/gzip_ref_system
-          ./bin/gzip_ref_official version && ./bin/gzip_ref version && ./bin/gzip_ref_system version
-      - name: three-way byte cross-check
-        env:
-          CGO_ENABLED: "1"
-        run: go run ./cmd/crossnative -mode check -native ./bin/gzip_ref_official,./bin/gzip_ref,./bin/gzip_ref_system
+          make native-build
+          ./bin/gzip_ref version && ./bin/gzip_ref_system version
+      - name: byte cross-check (official + system referee vs pure Go)
+        run: go run ./cmd/crossnative -mode check -native ./bin/gzip_ref,./bin/gzip_ref_system
 
-  # Memory safety net: run ASan+LSan over all C-layer entry points (precise
-  # leak check); go test -asan checks for memory errors under real cgo workloads
-  # (LSan doesn't understand pool references held in the Go heap, so
-  #  detect_leaks is disabled on the Go side; Go-side leaks are covered by
-  #  TestCgoMemoryBounded's bounded-RSS check)
   # Full test suite under the Go race detector — dedicated coverage for the
   # sync.Pool adversarial tests (concurrent cross-contamination, scratch
-  # aliasing, Writer reuse). -race requires cgo, so this runs with CGO=1.
+  # aliasing, chunk-boundary stress, Writer reuse). The referee is built so
+  # the C-comparison legs run under race too.
   race:
     name: race detector (incl. sync.Pool stress)
     runs-on: ubuntu-latest
@@ -114,43 +75,26 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
+      - name: build referee
+        run: make native-build
       - name: go test -race
         env:
-          CGO_ENABLED: "1"
           ZLIB_FUZZ_ITER: "50"
         run: go test -race -count=1 ./...
 
+  # Memory safety net: ASan/LSan over every referee mode (compress/stream/
+  # header/bench) with parameter edge cases — the whole C surface this
+  # repository executes.
   sanitize:
-    name: ASan/LSan memory checks
+    name: ASan/LSan referee sweep
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: stable
-      - name: C-layer leak check (LeakSanitizer)
-        run: |
-          cc -O1 -g -fsanitize=address,leak native/leak_check.c -Iinternal/czlib/zlib -o leak_check
-          ./leak_check
-      - name: native tool ASan smoke test
-        run: |
-          mkdir -p bin
-          cc -O1 -g -fsanitize=address,leak -c internal/czlib/zlib/zlib_amalgam.c -o bin/zlib_amalgam_asan.o -Iinternal/czlib/zlib
-          c++ -O1 -g -fsanitize=address,leak -std=c++17 native/gzip_ref.cpp bin/zlib_amalgam_asan.o -Iinternal/czlib/zlib -o bin/gzip_ref_asan
-          head -c 200000 /dev/urandom > /tmp/in.bin
-          ./bin/gzip_ref_asan compress 6 123 3 < /tmp/in.bin > /dev/null
-          ./bin/gzip_ref_asan compress 0 123 3 99999 < /tmp/in.bin > /dev/null
-          ./bin/gzip_ref_asan header 9 123 3 6e616d65 636f6d6d656e74 dead < /tmp/in.bin > /dev/null
-          ./bin/gzip_ref_asan bench 6 50 < /tmp/in.bin
-      - name: go test -asan (cgo path memory error check)
-        env:
-          CGO_ENABLED: "1"
-          ASAN_OPTIONS: detect_leaks=0
-          ZLIB_FUZZ_ITER: "50"
-        run: go test -asan -count=1 ./...
+      - name: ASan/LSan sweep
+        run: make asan-check
 
-  # Randomized fuzz cross-check: C zlib vs pure Go, byte-for-byte comparison
+  # Randomized fuzz cross-check: real zlib vs pure Go, byte-for-byte
   fuzz:
     name: randomized fuzz cross-check (500 cases)
     runs-on: ubuntu-latest
@@ -160,20 +104,21 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
+      - name: build referee
+        run: make native-build
       - name: fuzz cross-check
         env:
-          CGO_ENABLED: "1"
           ZLIB_FUZZ_ITER: "500"
           ZLIB_FUZZ_MAXSIZE: "1048576"
-        run: go test ./internal/czlib/ -run TestCrossCheckFuzz -timeout 2400s -v
+        run: go test . -run TestCrossCheckFuzz -timeout 2400s -v
 
-  # Three-way benchmark: C++ native / CGO / pure Go (with memory stats).
+  # Three-way benchmark: C++ native / pure Go / std Go (with memory stats).
   # On PRs the table goes to the job summary; on push to main it is written
   # back into the README and committed. The run is pinned to the triggering
   # commit (checkout defaults to github.sha); it only runs when test+native
   # are all green (no tables for failing commits).
   bench:
-    name: benchmark native/CGO/pure Go
+    name: benchmark native/pure Go/std Go
     runs-on: ubuntu-latest
     timeout-minutes: 40
     needs: [test, native]
@@ -188,17 +133,12 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: build native reference
-        run: |
-          mkdir -p bin
-          cc  -O2 -c internal/czlib/zlib/zlib_amalgam.c -o bin/zlib_amalgam.o -Iinternal/czlib/zlib
-          c++ -O2 -std=c++17 native/gzip_ref.cpp bin/zlib_amalgam.o -Iinternal/czlib/zlib -o bin/gzip_ref
+      - name: build referee (official zlib 1.3.1)
+        run: make native-build
       - name: run benchmarks
-        env:
-          CGO_ENABLED: "1"
         run: |
           go run ./cmd/crossnative -mode bench -native ./bin/gzip_ref -benchtime 2s -out bench.md
-          echo "## Three-way benchmark" >> "$GITHUB_STEP_SUMMARY"
+          echo "## Benchmark" >> "$GITHUB_STEP_SUMMARY"
           cat bench.md >> "$GITHUB_STEP_SUMMARY"
           echo "## Code size" >> "$GITHUB_STEP_SUMMARY"
           go run ./cmd/crossnative -mode loc >> "$GITHUB_STEP_SUMMARY"
@@ -229,7 +169,7 @@ jobs:
             exit 1
           fi
 
-  # Cross-platform compilability of the pure Go path
+  # Cross-platform compilability of the pure Go product
   cross-build:
     name: cross build (pure Go)
     runs-on: ubuntu-latest

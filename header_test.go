@@ -10,8 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/hkloudou/gzip/internal/czlib"
 )
 
 // latin1Len returns the byte length of the string in Latin-1 encoding
@@ -155,9 +153,7 @@ func TestHeaderPrefixMatchesStdlibWriter(t *testing.T) {
 // sequence semantics for large payloads are covered by the zlib package's
 // streaming cross-checks and crossnative.
 func TestHeaderMatchesCZlib(t *testing.T) {
-	if !czlib.HasCGO() {
-		t.Skip("requires CGO_ENABLED=1 (real C zlib)")
-	}
+	bin := needRef(t)
 	payload := bytes.Repeat([]byte(`{"k":"v","header":"cross-check"},`), 500)
 	ts := uint32(1751038273)
 
@@ -178,10 +174,7 @@ func TestHeaderMatchesCZlib(t *testing.T) {
 		for _, hOS := range []byte{3, 255} {
 			for _, hTS := range []uint32{0, ts} {
 				for level := -1; level <= 9; level++ {
-					want, err := czlib.CompressWithGzHeader(payload, level, hTS, hOS, c.extra, c.name, c.comment)
-					if err != nil {
-						t.Fatalf("%s level %d: C: %v", c.label, level, err)
-					}
+					want := refHeader(t, bin, payload, level, hTS, hOS, c.extra, c.name, c.comment)
 
 					var buf bytes.Buffer
 					w, err := NewWriterLevel(&buf, level)
@@ -224,9 +217,7 @@ func TestHeaderMatchesCZlib(t *testing.T) {
 // then round-trips the decoded fields through the standard library reader.
 // Fixed seed; ZLIB_FUZZ_ITER / ZLIB_FUZZ_SEED adjust intensity.
 func TestHeaderFuzzMatchesCZlib(t *testing.T) {
-	if !czlib.HasCGO() {
-		t.Skip("requires CGO_ENABLED=1 (real C zlib)")
-	}
+	bin := needRef(t)
 	iterations := 150
 	if testing.Short() {
 		iterations = 25
@@ -280,10 +271,7 @@ func TestHeaderFuzzMatchesCZlib(t *testing.T) {
 			payload[j] = byte(rng.Intn(alpha))
 		}
 
-		want, err := czlib.CompressWithGzHeader(payload, level, ts, osByte, extra, name, comment)
-		if err != nil {
-			t.Fatalf("fuzz#%d: C zlib: %v", i, err)
-		}
+		want := refHeader(t, bin, payload, level, ts, osByte, extra, name, comment)
 
 		var buf bytes.Buffer
 		w, err := NewWriterLevel(&buf, level)

@@ -8,7 +8,6 @@ import (
 	"io"
 	"testing"
 
-	"github.com/hkloudou/gzip/internal/czlib"
 	"github.com/hkloudou/gzip/internal/zdeflate"
 )
 
@@ -82,7 +81,7 @@ func TestGoldenViaWriter(t *testing.T) {
 
 // TestWriterMatchesOneShot verifies the Writer output is byte-identical
 // to the one-shot reference implementation (the pure-Go reference always;
-// under CGO builds it is additionally cross-checked against real C zlib).
+// additionally against real C zlib when the referee binary is built).
 func TestWriterMatchesOneShot(t *testing.T) {
 	data := bytes.Repeat([]byte(`{"key":"value","n":42},`), 1000)
 	ts := uint32(1751038273)
@@ -97,11 +96,8 @@ func TestWriterMatchesOneShot(t *testing.T) {
 	if !bytes.Equal(buf.Bytes(), want) {
 		t.Fatalf("Writer output differs from the pure-Go one-shot reference (%d vs %d bytes)", buf.Len(), len(want))
 	}
-	if czlib.HasCGO() {
-		cWant, err := czlib.CompressOpts(data, ts, -1, 3)
-		if err != nil {
-			t.Fatal(err)
-		}
+	if bin := refPath(); bin != "" {
+		cWant := refGzip(t, bin, data, -1, ts, 3, -1)
 		if !bytes.Equal(buf.Bytes(), cWant) {
 			t.Fatal("Writer output differs from real C zlib")
 		}
@@ -123,17 +119,14 @@ func TestWriterLevels(t *testing.T) {
 			t.Fatalf("level %d: %v", level, err)
 		}
 
-		// Cross-check against the one-shot reference (mtime=0; under CGO
-		// builds additionally against real C zlib)
+		// Cross-check against the one-shot reference (mtime=0; additionally
+		// against real C zlib when the referee binary is built)
 		want := zdeflate.GzipCompressLevel(data, 0, level, 3)
 		if !bytes.Equal(buf.Bytes(), want) {
 			t.Errorf("level %d: Writer output differs from the pure-Go one-shot reference", level)
 		}
-		if czlib.HasCGO() {
-			cWant, err := czlib.CompressOpts(data, 0, level, 3)
-			if err != nil {
-				t.Fatal(err)
-			}
+		if bin := refPath(); bin != "" {
+			cWant := refGzip(t, bin, data, level, 0, 3, -1)
 			if !bytes.Equal(buf.Bytes(), cWant) {
 				t.Errorf("level %d: Writer output differs from real C zlib", level)
 			}
@@ -210,18 +203,15 @@ func TestWriterChunkedWrites(t *testing.T) {
 
 // TestWriterFlushMatchesZlib verifies Flush (Z_SYNC_FLUSH) is
 // byte-identical to the one-shot reference for the same call sequence
-// (under CGO builds the reference is real C zlib).
+// (additionally against real C zlib when the referee binary is built).
 func TestWriterFlushMatchesZlib(t *testing.T) {
 	data := bytes.Repeat([]byte(`{"id":1,"name":"user","email":"u@example.com"},`), 2000)
 	ts := uint32(1751038273)
 	split := len(data) / 2
 
 	want := syncFlushReference(t, data, ts, -1, split)
-	if czlib.HasCGO() {
-		cWant, err := czlib.CompressWithSyncFlush(data, ts, -1, 3, split)
-		if err != nil {
-			t.Fatal(err)
-		}
+	if bin := refPath(); bin != "" {
+		cWant := refGzip(t, bin, data, -1, ts, 3, split)
 		if !bytes.Equal(cWant, want) {
 			t.Fatal("pure-Go sync flush reference differs from real C zlib")
 		}
@@ -313,11 +303,8 @@ func TestWriterAllLevelsWithFlush(t *testing.T) {
 				t.Errorf("level %d: Writer (with Flush) differs from the single-SYNC semantics reference (%d vs %d)",
 					level, buf.Len(), len(want2))
 			}
-			if czlib.HasCGO() {
-				want3, err := czlib.CompressWithSyncFlush(data, ts, level, 3, split)
-				if err != nil {
-					t.Fatalf("level %d: %v", level, err)
-				}
+			if bin := refPath(); bin != "" {
+				want3 := refGzip(t, bin, data, level, ts, 3, split)
 				if !bytes.Equal(buf.Bytes(), want3) {
 					t.Errorf("level %d: Writer (with Flush) differs from real C zlib", level)
 				}

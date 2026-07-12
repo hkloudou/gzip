@@ -1,20 +1,22 @@
-// crossnative is the three-way cross-check / benchmark orchestrator:
+// crossnative is the cross-check / benchmark orchestrator. The referees are
+// C++ native binaries (native/gzip_ref.cpp — real zlib as a subprocess, no
+// C code from this repository), normally two builds:
 //
-//	C++ native     (native/gzip_ref.cpp, real zlib without cgo)
-//	C reference    (internal/czlib, cgo with embedded zlib 1.3.1, test-only)
-//	This library   (internal/zdeflate pure-Go port — the product's compression implementation)
+//	official  built from the downloaded official zlib 1.3.1 tarball
+//	          (pinned SHA-256) — the deterministic correct answer
+//	system    linked against the system zlib
 //
-// -mode check: full matrix of corpus × level × flush × header fields; all
-// three outputs must match byte-for-byte. Any mismatch exits non-zero and
+// -mode check: full matrix of corpus × level × flush × header fields; every
+// referee's output and the pure Go library's output (internal/zdeflate +
+// gzip.Writer) must match byte-for-byte. Any mismatch exits non-zero and
 // prints hex context around the first differing byte.
 //
-// -mode bench: measures throughput of all three on the same corpus (native is
-// timed by an in-process loop in the subprocess, both Go sides use
-// testing.Benchmark) and renders a markdown table; -update-readme writes the
-// table into the README's AUTOBENCH marker block.
+// -mode bench: measures throughput of C++ native / pure Go / std Go on the
+// same corpus (native is timed by an in-process loop in the subprocess, the
+// Go sides use testing.Benchmark) and renders a markdown table;
+// -update-readme writes the table into the README's AUTOBENCH marker block.
 //
-// Must be built and run with CGO_ENABLED=1, otherwise the C reference side is
-// unavailable and the three-way cross-check is meaningless.
+// This tool is pure Go and needs no cgo; it only shells out to the referee.
 package main
 
 import (
@@ -37,7 +39,6 @@ import (
 	"time"
 
 	gzip "github.com/hkloudou/gzip"
-	"github.com/hkloudou/gzip/internal/czlib"
 	"github.com/hkloudou/gzip/internal/zdeflate"
 )
 
@@ -94,11 +95,6 @@ func main() {
 	out := flag.String("out", "", "also save the bench markdown to a file")
 	from := flag.String("from", "", "patch mode: read a previously generated bench markdown file")
 	flag.Parse()
-
-	if *mode != "patch" && *mode != "loc" && !czlib.HasCGO() {
-		fmt.Fprintln(os.Stderr, "crossnative: must be built and run with CGO_ENABLED=1 (the C reference side needs real C zlib)")
-		os.Exit(1)
-	}
 
 	bins := strings.Split(*native, ",")
 	switch *mode {
@@ -180,17 +176,14 @@ func mismatch(label string, a, b []byte, aName, bName string) {
 	failures++
 }
 
-func expectEqual(label string, native, cgo, pure []byte) {
-	if !bytes.Equal(native, cgo) {
-		mismatch(label, native, cgo, "native", "cgo")
-	}
-	if !bytes.Equal(cgo, pure) {
-		mismatch(label, cgo, pure, "cgo", "pureGo")
+func expectEqual(label string, native, pure []byte) {
+	if !bytes.Equal(native, pure) {
+		mismatch(label, native, pure, "native", "pureGo")
 	}
 }
 
 func runCheck(bin string) {
-	fmt.Printf("== three-way cross-check: native=%s (zlib %s) | C reference (cgo embedded zlib) | this library (pure Go) ==\n", bin, nativeVersion(bin))
+	fmt.Printf("== cross-check: native=%s (real zlib %s) | this library (pure Go) ==\n", bin, nativeVersion(bin))
 	entries := corpus()
 	levels := []int{-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9}
 	checks := 0
@@ -200,18 +193,15 @@ func runCheck(bin string) {
 		for _, level := range levels {
 			nat := runNative(bin, e.data, "compress",
 				strconv.Itoa(level), strconv.FormatUint(uint64(ts), 10), strconv.Itoa(int(osByte)))
-			cgo, err := czlib.CompressOpts(e.data, ts, level, osByte)
-			must(err)
 			pure := zdeflate.GzipCompressLevel(e.data, ts, level, osByte)
-			expectEqual(fmt.Sprintf("compress/%s/level=%d", e.name, level), nat, cgo, pure)
+			expectEqual(fmt.Sprintf("compress/%s/level=%d", e.name, level), nat, pure)
 			checks++
 		}
 	}
 	fmt.Printf("  one-shot compression: %d cases\n", checks)
 
-	// 1b. MTIME × OS byte dimensions (the matrix from the former cmd/compare,
-	// merged into the three-way check): both only affect header bytes, but
-	// must still match byte-for-byte across all three
+	// 1b. MTIME × OS byte dimensions: both only affect header bytes, but
+	// must still match byte-for-byte
 	prev := checks
 	dimCorpus := []corpusEntry{entries[2], entries[5], entries[7]} // 198B token / 100KB binary / 1MB json
 	for _, e := range dimCorpus {
@@ -220,11 +210,9 @@ func runCheck(bin string) {
 				for _, hOS := range []byte{0, 3, 11, 255} {
 					nat := runNative(bin, e.data, "compress", strconv.Itoa(level),
 						strconv.FormatUint(uint64(hTS), 10), strconv.Itoa(int(hOS)))
-					cgo, err := czlib.CompressOpts(e.data, hTS, level, hOS)
-					must(err)
 					pure := zdeflate.GzipCompressLevel(e.data, hTS, level, hOS)
 					expectEqual(fmt.Sprintf("tsos/%s/level=%d/ts=%d/os=%d", e.name, level, hTS, hOS),
-						nat, cgo, pure)
+						nat, pure)
 					checks++
 				}
 			}
@@ -243,20 +231,46 @@ func runCheck(bin string) {
 				nat := runNative(bin, e.data, "compress",
 					strconv.Itoa(level), strconv.FormatUint(uint64(ts), 10),
 					strconv.Itoa(int(osByte)), strconv.Itoa(at))
-				cgo, err := czlib.CompressWithSyncFlush(e.data, ts, level, osByte, at)
-				must(err)
 				pure := pureSyncFlush(e.data, ts, level, osByte, at)
-				expectEqual(fmt.Sprintf("syncflush/%s/level=%d/at=%d", e.name, level, at), nat, cgo, pure)
+				expectEqual(fmt.Sprintf("syncflush/%s/level=%d/at=%d", e.name, level, at), nat, pure)
 				checks++
 			}
 		}
 	}
 	fmt.Printf("  Z_SYNC_FLUSH: %d cases\n", checks-prev)
 
+	// 2b. Streaming call sequences: raw deflate driven by identical
+	// (chunk, flush) sequences on both sides, covering every flush type
+	prev = checks
+	seqData := entries[7].data[:512*1024] // 1MB json prefix
+	seqs := []struct {
+		name    string
+		chunks  []int
+		flushes []int
+	}{
+		{"sync_thirds", []int{170 << 10, 170 << 10, 512<<10 - 2*(170<<10)}, []int{2, 2, 4}},
+		{"partial_full_mix", []int{100 << 10, 200 << 10, 212 << 10}, []int{1, 3, 4}},
+		{"writer_sequence", []int{256 << 10, 0, 256 << 10, 0}, []int{0, 2, 0, 4}},
+		{"empty_flushes", []int{0, 0, 512 << 10}, []int{2, 3, 4}},
+	}
+	for _, level := range []int{0, 1, 6, 9} {
+		for _, sq := range seqs {
+			args := []string{"stream", strconv.Itoa(level)}
+			for i := range sq.chunks {
+				args = append(args, fmt.Sprintf("%d@%d", sq.flushes[i], sq.chunks[i]))
+			}
+			nat := runNative(bin, seqData, args...)
+			pure := pureStream(seqData, level, sq.chunks, sq.flushes)
+			expectEqual(fmt.Sprintf("stream/%s/level=%d", sq.name, level), nat, pure)
+			checks++
+		}
+	}
+	fmt.Printf("  streaming call sequences: %d cases\n", checks-prev)
+
 	// 3. Full header-field parameter matrix: Name/Comment/Extra combinations
-	// × OS byte × MTIME × level × several content shapes. Both native and
-	// cgo go through real zlib's deflateSetHeader; gzip.Writer, after its
-	// XFL byte is fixed up, must match byte-for-byte as well.
+	// × OS byte × MTIME × level × several content shapes. The native side
+	// goes through real zlib's deflateSetHeader; gzip.Writer, after its
+	// XFL byte is fixed up, must match byte-for-byte.
 	prev = checks
 	headerCases := []struct {
 		label   string
@@ -283,8 +297,6 @@ func runCheck(bin string) {
 						nat := runNative(bin, e.data, "header",
 							strconv.Itoa(level), strconv.FormatUint(uint64(hTS), 10), strconv.Itoa(int(hOS)),
 							hexOrDash(latin1(hc.name)), hexOrDash(latin1(hc.comment)), hexOrDash(hc.extra))
-						cgo, err := czlib.CompressWithGzHeader(e.data, level, hTS, hOS, hc.extra, hc.name, hc.comment)
-						must(err)
 
 						var buf bytes.Buffer
 						w, err := gzip.NewWriterLevel(&buf, level)
@@ -315,21 +327,17 @@ func runCheck(bin string) {
 							// the C reference here does a single FINISH — C zlib
 							// itself produces different bytes for the two sequences
 							// (decompresses identically, see the note in
-							// gzip_test.go); unrelated to header fields.
-							// native↔cgo both do a single FINISH and must still
-							// match byte-for-byte; the Writer is checked for a
-							// byte-identical header prefix plus decompression
-							// round-trip.
-							if !bytes.Equal(nat, cgo) {
-								mismatch(label, nat, cgo, "native", "cgo")
-							}
+							// gzip_test.go); unrelated to header fields. The Writer
+							// is checked for a byte-identical header prefix plus a
+							// decompression round-trip; same-sequence level-0 parity
+							// is covered by the streaming cases above.
 							hdrLen := headerPrefixLen(hc.name, hc.comment, hc.extra)
 							if !bytes.Equal(writerOut[:hdrLen], nat[:hdrLen]) {
 								mismatch(label+"/prefix", writerOut[:hdrLen], nat[:hdrLen], "goWriter", "native")
 							}
 							verifyDecompress(label, buf.Bytes(), e.data)
 						} else {
-							expectEqual(label, nat, cgo, writerOut)
+							expectEqual(label, nat, writerOut)
 						}
 						checks++
 					}
@@ -361,7 +369,23 @@ func runCheck(bin string) {
 		fmt.Fprintf(os.Stderr, "crossnative: %d mismatches (out of %d cases)\n", failures, checks)
 		os.Exit(1)
 	}
-	fmt.Printf("PASS: %d cases byte-identical across all three\n\n", checks)
+	fmt.Printf("PASS: %d cases byte-identical (real zlib vs pure Go)\n\n", checks)
+}
+
+// pureStream replays a (chunk, flush) call sequence with the pure Go
+// streaming implementation (raw deflate) — the twin of gzip_ref stream mode.
+func pureStream(data []byte, level int, chunks, flushes []int) []byte {
+	d, err := zdeflate.NewDeflater(level)
+	must(err)
+	defer d.Close()
+	var raw bytes.Buffer
+	off := 0
+	for i := range chunks {
+		n := chunks[i]
+		must(d.Deflate(data[off:off+n], flushes[i], &raw))
+		off += n
+	}
+	return raw.Bytes()
 }
 
 // pureSyncFlush replays the single-SYNC semantics with this library's
@@ -485,7 +509,6 @@ type benchRow struct {
 	name    string
 	size    int
 	nativeN float64 // ns/op
-	cgo     testing.BenchmarkResult
 	pure    testing.BenchmarkResult
 	std     testing.BenchmarkResult // standard library compress/gzip (speed context only)
 }
@@ -515,11 +538,6 @@ func runBench(bin string, benchTime time.Duration, readmePath, outPath string) {
 	for _, c := range cases {
 		row := benchRow{name: c.name, size: len(c.data)}
 		row.nativeN = benchNative(bin, c.data, benchTime)
-		row.cgo = benchGo(c.data, func(data []byte) {
-			if _, err := czlib.CompressOpts(data, ts, -1, 3); err != nil {
-				panic(err)
-			}
-		})
 		row.pure = benchGo(c.data, func(data []byte) {
 			zdeflate.GzipCompressLevel(data, ts, -1, 3)
 		})
@@ -539,8 +557,8 @@ func runBench(bin string, benchTime time.Duration, readmePath, outPath string) {
 				panic(err)
 			}
 		})
-		fmt.Fprintf(os.Stderr, "bench %-28s native=%s cgo=%s pureGo=%s stdGo=%s\n",
-			c.name, fmtNs(row.nativeN), fmtNs(float64(row.cgo.NsPerOp())),
+		fmt.Fprintf(os.Stderr, "bench %-28s native=%s pureGo=%s stdGo=%s\n",
+			c.name, fmtNs(row.nativeN),
 			fmtNs(float64(row.pure.NsPerOp())), fmtNs(float64(row.std.NsPerOp())))
 		rows = append(rows, row)
 	}
@@ -641,24 +659,23 @@ func cell(ns float64, size int) string {
 func renderMarkdown(bin string, rows []benchRow) string {
 	var b strings.Builder
 	fmt.Fprintf(&b, "Level 6, each op is a full compression (reset + deflate + CRC + gzip framing); every column reuses compressor state (C++ via deflateReset, the Go columns via sync.Pool / Writer.Reset).\n\n")
-	fmt.Fprintf(&b, "- **C++ Native**: real zlib %s looping in-process, no cgo boundary — the C-side performance ceiling\n", nativeVersion(bin))
-	b.WriteString("- **CGO**: the embedded-zlib test reference (internal/czlib)\n")
+	fmt.Fprintf(&b, "- **C++ Native**: real zlib %s (built from the official 1.3.1 sources) looping in-process — the C performance ceiling and the byte-correctness referee\n", nativeVersion(bin))
 	b.WriteString("- **Pure Go**: this library\n")
 	b.WriteString("- **Std Go**: the standard library compress/gzip — speed context only; its output bytes differ by design, which is the reason this library exists\n\n")
 	b.WriteString("**Speed** (ratios are relative speed of Pure Go; higher = Pure Go faster):\n\n")
-	b.WriteString("| Input | C++ Native | CGO | Pure Go | Std Go | Pure Go / CGO | Pure Go / Std Go |\n")
-	b.WriteString("|---|---|---|---|---|---|---|\n")
+	b.WriteString("| Input | C++ Native | Pure Go | Std Go | Pure Go / C++ Native | Pure Go / Std Go |\n")
+	b.WriteString("|---|---|---|---|---|---|\n")
 	for _, r := range rows {
-		cgoNs, pureNs, stdNs := float64(r.cgo.NsPerOp()), float64(r.pure.NsPerOp()), float64(r.std.NsPerOp())
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s | %s |\n",
-			r.name, cell(r.nativeN, r.size), cell(cgoNs, r.size), cell(pureNs, r.size), cell(stdNs, r.size),
-			ratioCell(cgoNs/pureNs), ratioCell(stdNs/pureNs))
+		pureNs, stdNs := float64(r.pure.NsPerOp()), float64(r.std.NsPerOp())
+		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n",
+			r.name, cell(r.nativeN, r.size), cell(pureNs, r.size), cell(stdNs, r.size),
+			ratioCell(r.nativeN/pureNs), ratioCell(stdNs/pureNs))
 	}
-	b.WriteString("\n**Memory** (Go heap per op; C-side buffers of the CGO column are invisible to Go heap stats; Std Go compresses into a reused bytes.Buffer while the other Go columns return a fresh exact-size slice per op):\n\n")
-	b.WriteString("| Input | CGO | Pure Go | Std Go |\n")
-	b.WriteString("|---|---|---|---|\n")
+	b.WriteString("\n**Memory** (Go heap per op; the native referee is a subprocess and has no Go heap; Std Go compresses into a reused bytes.Buffer while Pure Go returns a fresh exact-size slice per op):\n\n")
+	b.WriteString("| Input | Pure Go | Std Go |\n")
+	b.WriteString("|---|---|---|\n")
 	for _, r := range rows {
-		fmt.Fprintf(&b, "| %s | %s | %s | %s |\n", r.name, memCell(r.cgo), memCell(r.pure), memCell(r.std))
+		fmt.Fprintf(&b, "| %s | %s | %s |\n", r.name, memCell(r.pure), memCell(r.std))
 	}
 	fmt.Fprintf(&b, "\n*%s · %s · go %s · %s/%s · commit `%s` (auto-updated by CI on push to main)*\n",
 		time.Now().UTC().Format("2006-01-02 15:04 UTC"), cpuModel(),
@@ -744,10 +761,9 @@ type locBucket struct {
 }
 
 // renderLoc counts Go source lines in the repo (physical lines) in three
-// buckets: product / tests (*_test.go) / test infrastructure (the C reference
-// package and the non-test code of the cross-check orchestrator).
-// The vendored zlib C sources and the C++ native tool are not Go code and
-// are not counted.
+// buckets: product / tests (*_test.go) / test infrastructure (the non-test
+// code of the cross-check orchestrator). The C++ referee tool is not Go code
+// and is not counted.
 func renderLoc() string {
 	var product, tests, infra locBucket
 	err := filepath.WalkDir(".", func(path string, d os.DirEntry, err error) error {
@@ -776,7 +792,7 @@ func renderLoc() string {
 		case strings.HasSuffix(path, "_test.go"):
 			tests.files++
 			tests.lines += lines
-		case strings.HasPrefix(path, "internal/czlib/") || strings.HasPrefix(path, "cmd/"):
+		case strings.HasPrefix(path, "cmd/"):
 			infra.files++
 			infra.lines += lines
 		default: // root package + internal/zdeflate
@@ -791,8 +807,8 @@ func renderLoc() string {
 	b.WriteString("| Category | Files | Go lines |\n|---|---|---|\n")
 	fmt.Fprintf(&b, "| Product (root package + internal/zdeflate, pure Go) | %d | %d |\n", product.files, product.lines)
 	fmt.Fprintf(&b, "| Tests (*_test.go) | %d | %d |\n", tests.files, tests.lines)
-	fmt.Fprintf(&b, "| Test infrastructure (internal/czlib + cmd, non-test) | %d | %d |\n", infra.files, infra.lines)
-	fmt.Fprintf(&b, "\n*(tests + infrastructure) : product ≈ %.1f : 1 (test-only vendored zlib C sources and the C++ native tool are not counted; auto-updated by CI on push to main)*\n",
+	fmt.Fprintf(&b, "| Test infrastructure (cmd/crossnative, non-test) | %d | %d |\n", infra.files, infra.lines)
+	fmt.Fprintf(&b, "\n*(tests + infrastructure) : product ≈ %.1f : 1 (the C++ referee tool is not Go code and is not counted; auto-updated by CI on push to main)*\n",
 		float64(tests.lines+infra.lines)/float64(product.lines))
 	return b.String()
 }
