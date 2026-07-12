@@ -25,7 +25,7 @@ of the product build — tests/CI only):
 
 | Reference | Location | Purpose |
 |---|---|---|
-| `gzip_ref` referee | `native/gzip_ref.cpp` (subprocess; a thin driver with no compression logic) | Real zlib as the deterministic correct answer: built from the official zlib 1.3.1 tarball, plus a system-zlib variant |
+| `gzip_ref` referee | `native/gzip_ref.cpp` (subprocess; a thin driver with no compression logic) | Real zlib as the deterministic correct answer: built from the official zlib 1.3.1 tarball (the pinned byte-correctness referee), plus official-1.3.2 and system-zlib variants |
 | Cross-check / fuzz / streaming matrices | root package `*_ref_test.go` | Levels 0-9 × large corpora × flush sequences × all header parameters × random fuzz, byte-compared against the referee (`make test` / `make fuzz`) |
 | crossnative orchestrator | `cmd/crossnative` | The CI cross-check matrix, the benchmark table and the line-count bot |
 
@@ -144,6 +144,7 @@ func compress(data []byte, ts uint32, level int) ([]byte, error) {
 
 | Platform | Byte-identical to standard zlib? | Notes |
 |---|---|---|
+| zlib 1.3.2 (newest official release) | ✅ identical | **Verified in CI every run**: a second referee built from the official 1.3.2 tarball joins the full cross-check matrix; 1.3.2's changes (build system, hardening, inflate, new `_z` APIs) do not touch deflate output |
 | iOS/macOS system libz (`deflate()`) | ✅ identical | **Verified in CI every run**: the macOS native job links the referee against the system libz (`gzip_ref_system`) and cross-checks all levels/matrices byte-for-byte against this library. Apple's changes are limited to inflate/checksum acceleration; the gzip header OS byte is 19 on Apple platforms, which this library sidesteps by writing OS=3 itself |
 | Apple Compression framework (`COMPRESSION_ZLIB`) | ⚠️ measured = zlib level 9, not guaranteed | Apple only promises raw DEFLATE and describes it as a "level 5 equivalent"; measurements (macOS 15.7 arm64, v1.1.x CI probe) showed its output byte-identical to standard zlib **level 9** (not 5). This is an unpromised implementation detail that may change with OS versions |
 | Java `java.util.zip.Deflater` (OpenJDK) | ✅ identical | Bundles/links official zlib (except distros like Fedora 40+ that switched to zlib-ng) |
@@ -156,26 +157,28 @@ func compress(data []byte, ts uint32, level int) ([]byte, error) {
 
 ```bash
 make test        # referee build + full test suite (C legs skip if no C toolchain)
-make native      # byte-for-byte cross-check matrix (official + system zlib referees)
+make native      # byte-for-byte cross-check matrix (official 1.3.1 + 1.3.2 + system zlib referees)
 make fuzz        # heavy randomized cross-check (real zlib vs pure Go)
-make bench-table # benchmark table (C++ native / pure Go / std Go)
-make asan-check  # ASan/LSan sweep over every referee mode
+make bench-table # benchmark table (C++ zlib 1.3.1 + 1.3.2 / pure Go / std Go)
+make asan-check  # ASan/LSan sweep over every referee mode (both official builds)
 ```
 
-The referee is built from the official `zlib-1.3.1.tar.gz` (downloaded and
-SHA-256-verified into `.cache/`, or point `ZLIB131_DIR` at an existing zlib
-source tree for offline work). Every push runs
+The referees are built from the official `zlib-1.3.1.tar.gz` and
+`zlib-1.3.2.tar.gz` (downloaded and SHA-256-verified into `.cache/`, with a
+`zlib.net/fossils/` fallback for releases zlib.net has rotated out; or point
+`ZLIB131_DIR`/`ZLIB132_DIR` at existing zlib source trees for offline work).
+Every push runs
 [GitHub Actions](.github/workflows/ci.yml) as the final consistency backstop
 (click the badge above for live results):
 
 | CI job | Coverage |
 |---|---|
 | test (ubuntu/macos/windows) | Full unit tests + real-zlib cross-checks: levels 0-9 × flush types (NO_FLUSH/PARTIAL/SYNC/FULL/FINISH) full matrix, golden vectors, streaming call sequences, Writer behavior, **all header parameters × real zlib `deflateSetHeader`** (deterministic + seeded random fuzz), streaming-output/HTTP tests, `sync.Pool` stress. On windows the referee legs skip (pure Go coverage only) |
-| native (ubuntu/macos) | **Cross-check matrix**: real zlib vs pure Go, byte-for-byte. The referee is built from the **official zlib 1.3.1 tarball** (pinned SHA-256; independent of this repository) and, as a second environment, against the system zlib — on macOS that is Apple's libz, so Apple-platform compatibility is re-verified every run. Matrix: 8 corpora × 11 levels × flush positions + streaming call sequences + MTIME × OS dimensions + all header parameters + empty input |
+| native (ubuntu/macos) | **Cross-check matrix**: real zlib vs pure Go, byte-for-byte, against three referees — the **official zlib 1.3.1 tarball** (pinned SHA-256; the byte-correctness pin, independent of this repository), the **official zlib 1.3.2 tarball** (the newest release, same pinning), and the system zlib — on macOS that is Apple's libz, so Apple-platform compatibility is re-verified every run. Matrix: 8 corpora × 11 levels × flush positions + streaming call sequences + MTIME × OS dimensions + all header parameters + empty input |
 | race | Full test suite (referee included) under the Go race detector, with dedicated `sync.Pool` adversarial tests (concurrent cross-contamination, scratch aliasing, chunk-boundary stress, Writer reuse) |
-| sanitize | ASan + LeakSanitizer over every referee mode (compress/stream/header/bench × parameter edge cases) |
+| sanitize | ASan + LeakSanitizer over every referee mode (compress/stream/header/bench × parameter edge cases), for both official zlib builds (1.3.1 + 1.3.2) |
 | fuzz | 500 random inputs × random levels, real zlib vs pure Go byte comparison |
-| bench | Three-way benchmark (C++ native / pure Go / std Go, with memory stats); auto-updates the table below on push to main |
+| bench | Four-way benchmark (C++ zlib 1.3.1 / C++ zlib 1.3.2 / pure Go / std Go, with memory stats); auto-updates the table below on push to main |
 | cross-build | Pure-Go cross-compilation for linux/arm64, windows, darwin/arm64, js/wasm |
 
 ### Benchmark (auto-updated by CI)

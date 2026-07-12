@@ -1,20 +1,23 @@
 // crossnative is the cross-check / benchmark orchestrator. The referees are
 // C++ native binaries (native/gzip_ref.cpp — real zlib as a subprocess, no
-// C code from this repository), normally two builds:
+// C code from this repository), normally three builds:
 //
-//	official  built from the downloaded official zlib 1.3.1 tarball
-//	          (pinned SHA-256) — the deterministic correct answer
-//	system    linked against the system zlib
+//	official 1.3.1  built from the downloaded official zlib 1.3.1 tarball
+//	                (pinned SHA-256) — the deterministic correct answer
+//	official 1.3.2  built from the official zlib 1.3.2 tarball (pinned
+//	                SHA-256) — the newest official release
+//	system          linked against the system zlib
 //
 // -mode check: full matrix of corpus × level × flush × header fields; every
 // referee's output and the pure Go library's output (internal/zdeflate +
 // gzip.Writer) must match byte-for-byte. Any mismatch exits non-zero and
 // prints hex context around the first differing byte.
 //
-// -mode bench: measures throughput of C++ native / pure Go / std Go on the
-// same corpus (native is timed by an in-process loop in the subprocess, the
-// Go sides use testing.Benchmark) and renders a markdown table;
-// -update-readme writes the table into the README's AUTOBENCH marker block.
+// -mode bench: measures throughput of every C++ native given in -native
+// (one table column each) plus pure Go and std Go on the same corpus
+// (native is timed by an in-process loop in the subprocess, the Go sides
+// use testing.Benchmark) and renders a markdown table; -update-readme
+// writes the table into the README's AUTOBENCH marker block.
 //
 // This tool is pure Go and needs no cgo; it only shells out to the referee.
 package main
@@ -97,13 +100,16 @@ func main() {
 	flag.Parse()
 
 	bins := strings.Split(*native, ",")
+	for i := range bins {
+		bins[i] = strings.TrimSpace(bins[i])
+	}
 	switch *mode {
 	case "check":
 		for _, bin := range bins {
-			runCheck(strings.TrimSpace(bin))
+			runCheck(bin)
 		}
 	case "bench":
-		runBench(strings.TrimSpace(bins[0]), *benchTime, *updateReadme, *out)
+		runBench(bins, *benchTime, *updateReadme, *out)
 	case "loc":
 		// Count Go lines (product / tests / test infrastructure) and render
 		// a markdown table; -update-readme writes the AUTOLOC block.
@@ -508,12 +514,12 @@ func must(err error) {
 type benchRow struct {
 	name    string
 	size    int
-	nativeN float64 // ns/op
+	nativeN []float64 // ns/op, one per -native binary
 	pure    testing.BenchmarkResult
 	std     testing.BenchmarkResult // standard library compress/gzip (speed context only)
 }
 
-func runBench(bin string, benchTime time.Duration, readmePath, outPath string) {
+func runBench(bins []string, benchTime time.Duration, readmePath, outPath string) {
 	cases := []corpusEntry{
 		{"2 B", []byte("{}")},
 		{"198 B JSON token", corpus()[2].data},
@@ -537,7 +543,9 @@ func runBench(bin string, benchTime time.Duration, readmePath, outPath string) {
 	rows := make([]benchRow, 0, len(cases))
 	for _, c := range cases {
 		row := benchRow{name: c.name, size: len(c.data)}
-		row.nativeN = benchNative(bin, c.data, benchTime)
+		for _, bin := range bins {
+			row.nativeN = append(row.nativeN, benchNative(bin, c.data, benchTime))
+		}
 		row.pure = benchGo(c.data, func(data []byte) {
 			zdeflate.GzipCompressLevel(data, ts, -1, 3)
 		})
@@ -557,13 +565,17 @@ func runBench(bin string, benchTime time.Duration, readmePath, outPath string) {
 				panic(err)
 			}
 		})
+		natives := make([]string, len(bins))
+		for i, ns := range row.nativeN {
+			natives[i] = fmtNs(ns)
+		}
 		fmt.Fprintf(os.Stderr, "bench %-28s native=%s pureGo=%s stdGo=%s\n",
-			c.name, fmtNs(row.nativeN),
+			c.name, strings.Join(natives, "/"),
 			fmtNs(float64(row.pure.NsPerOp())), fmtNs(float64(row.std.NsPerOp())))
 		rows = append(rows, row)
 	}
 
-	md := renderMarkdown(bin, rows)
+	md := renderMarkdown(bins, rows)
 	fmt.Print(md)
 	if outPath != "" {
 		must(os.WriteFile(outPath, []byte(md), 0o644))
@@ -656,20 +668,45 @@ func cell(ns float64, size int) string {
 	return fmtNs(ns) + "/op"
 }
 
-func renderMarkdown(bin string, rows []benchRow) string {
+func renderMarkdown(bins []string, rows []benchRow) string {
+	labels := make([]string, len(bins))
+	for i, bin := range bins {
+		labels[i] = "C++ zlib " + nativeVersion(bin)
+	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Level 6, each op is a full compression (reset + deflate + CRC + gzip framing); every column reuses compressor state (C++ via deflateReset, the Go columns via sync.Pool / Writer.Reset).\n\n")
-	fmt.Fprintf(&b, "- **C++ Native**: real zlib %s (built from the official 1.3.1 sources) looping in-process — the C performance ceiling and the byte-correctness referee\n", nativeVersion(bin))
+	for i, label := range labels {
+		role := "the newest official zlib release (byte-identical output, enforced by the cross-check matrix)"
+		if i == 0 {
+			role = "the C performance ceiling and the byte-correctness referee"
+		}
+		fmt.Fprintf(&b, "- **%s**: real zlib built from the official %s sources, looping in-process — %s\n",
+			label, nativeVersion(bins[i]), role)
+	}
 	b.WriteString("- **Pure Go**: this library\n")
 	b.WriteString("- **Std Go**: the standard library compress/gzip — speed context only; its output bytes differ by design, which is the reason this library exists\n\n")
 	b.WriteString("**Speed** (ratios are relative speed of Pure Go; higher = Pure Go faster):\n\n")
-	b.WriteString("| Input | C++ Native | Pure Go | Std Go | Pure Go / C++ Native | Pure Go / Std Go |\n")
-	b.WriteString("|---|---|---|---|---|---|\n")
+	b.WriteString("| Input |")
+	for _, label := range labels {
+		b.WriteString(" " + label + " |")
+	}
+	b.WriteString(" Pure Go | Std Go |")
+	for _, label := range labels {
+		b.WriteString(" Pure Go / " + label + " |")
+	}
+	b.WriteString(" Pure Go / Std Go |\n")
+	b.WriteString("|---|" + strings.Repeat("---|", 2*len(labels)+3) + "\n")
 	for _, r := range rows {
 		pureNs, stdNs := float64(r.pure.NsPerOp()), float64(r.std.NsPerOp())
-		fmt.Fprintf(&b, "| %s | %s | %s | %s | %s | %s |\n",
-			r.name, cell(r.nativeN, r.size), cell(pureNs, r.size), cell(stdNs, r.size),
-			ratioCell(r.nativeN/pureNs), ratioCell(stdNs/pureNs))
+		fmt.Fprintf(&b, "| %s |", r.name)
+		for _, ns := range r.nativeN {
+			fmt.Fprintf(&b, " %s |", cell(ns, r.size))
+		}
+		fmt.Fprintf(&b, " %s | %s |", cell(pureNs, r.size), cell(stdNs, r.size))
+		for _, ns := range r.nativeN {
+			fmt.Fprintf(&b, " %s |", ratioCell(ns/pureNs))
+		}
+		fmt.Fprintf(&b, " %s |\n", ratioCell(stdNs/pureNs))
 	}
 	b.WriteString("\n**Memory** (Go heap per op; the native referee is a subprocess and has no Go heap; Std Go compresses into a reused bytes.Buffer while Pure Go returns a fresh exact-size slice per op):\n\n")
 	b.WriteString("| Input | Pure Go | Std Go |\n")

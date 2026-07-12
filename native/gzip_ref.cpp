@@ -1,12 +1,14 @@
 // gzip_ref — standalone C++ native reference tool (this repository's only
 // C++ source; it contains no compression logic of its own).
 //
-// Produces GZIP/deflate byte streams with real zlib — built either against
-// the official zlib 1.3.1 tarball (pinned SHA-256; the deterministic
-// reference) or the system zlib — acting as the referee for the cross-check:
-// its output and the pure Go library's output must match byte-for-byte.
+// Produces GZIP/deflate byte streams with real zlib — built against an
+// official zlib tarball (pinned SHA-256 each: 1.3.1, the deterministic
+// byte-correctness reference, or 1.3.2, the newest release) or the system
+// zlib — acting as the referee for the cross-check: its output and the pure
+// Go library's output must match byte-for-byte.
 //
-// Build (official tarball; `make native-build` automates download + build):
+// Build (official tarballs; `make native-build` / `make native-build-132`
+// automate download + build):
 //   (cd zlib-1.3.1 && ./configure --static && make libz.a)
 //   c++ -O2 -std=c++17 native/gzip_ref.cpp zlib-1.3.1/libz.a -Izlib-1.3.1 -o gzip_ref
 //
