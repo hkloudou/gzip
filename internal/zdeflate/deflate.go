@@ -285,6 +285,35 @@ func (s *state) insertString(str int) int {
 	return int(matchHead)
 }
 
+// hash3 is C's rolling ins_h at position str, computed directly from the
+// three bytes it covers instead of by rolling. The two are equal at every
+// position: hashShift*minMatch == hashBits (5*3 == 15), so on each rolling
+// step the oldest byte's contribution is shifted entirely above hashMask,
+// leaving ins_h(str) == (w[str]<<10 ^ w[str+1]<<5 ^ w[str+2]) & hashMask
+// regardless of prior history (bits already above the mask can only shift
+// further out, so intermediate masking changes nothing). The indices are
+// masked with windowSize-1 purely so the compiler drops the bounds checks:
+// batch-insert positions always satisfy str+2 < windowSize (they lie at
+// least minMatch bytes inside the valid window data), so the masks are
+// identity and the loaded bytes are unchanged.
+func (s *state) hash3(str int) uint32 {
+	return (uint32(s.window[str&(windowSize-1)])<<(2*hashShift) ^
+		uint32(s.window[(str+1)&(windowSize-1)])<<hashShift ^
+		uint32(s.window[(str+2)&(windowSize-1)])) & hashMask
+}
+
+// insertPos inserts position str into the hash chains with an independently
+// computed hash — the chain updates are identical to INSERT_STRING because
+// hash3(str) == C's rolled ins_h at str (see hash3); the match_head return
+// is not needed at the batch call sites (C discards it there too). Unlike
+// insertString it does not touch s.insH: the batch loops that use it restore
+// insH afterwards to exactly the value C's rolling loop would leave.
+func (s *state) insertPos(str int) {
+	h := s.hash3(str)
+	s.prev[str&wMask] = s.head[h]
+	s.head[h] = uint16(str)
+}
+
 // slideHash shifts the hash tables in step when the window slides down.
 // Each entry becomes m >= wSize ? m-wSize : nilPos(0); wSize is 1<<15, so the
 // condition is exactly the top bit of the 16-bit entry. (For prev, entries not
@@ -390,6 +419,16 @@ func zeroRange(b []byte) {
 	}
 }
 
+// load16m loads window bytes i and i+1 as a little-endian 16-bit value with
+// masked indexing. Every probe position in longestMatch satisfies
+// i+1 < windowSize (match < strstart <= windowSize-minLookahead and
+// bestLen <= maxMatch keep the probes inside the window), so the masks are
+// identity: the same two bytes are loaded, the masks only let the compiler
+// drop the bounds checks in the chain-walking loop.
+func load16m(win *[windowSize]byte, i int) uint16 {
+	return uint16(win[i&(windowSize-1)]) | uint16(win[(i+1)&(windowSize-1)])<<8
+}
+
 // longestMatch finds the longest match starting at curMatch, sets matchStart and
 // returns its length, at most lookahead. Port of the C version with wider loads:
 // the byte loop is replaced by 8-byte XOR compares whose first differing byte
@@ -405,12 +444,12 @@ func (s *state) longestMatch(curMatch int) int {
 	if s.strstart > maxDistance {
 		limit = s.strstart - maxDistance
 	}
-	win := s.window[:]
+	win := &s.window
 	prev := &s.prev
 
 	// Same bytes as the C scan_end1/scan_end pair and the match head pair
-	scanStart := binary.LittleEndian.Uint16(win[scan:])
-	scanEnd := binary.LittleEndian.Uint16(win[scan+bestLen-1:])
+	scanStart := load16m(win, scan)
+	scanEnd := load16m(win, scan+bestLen-1)
 
 	// Reduce the search effort when we already have a good match
 	if s.prevLength >= s.goodMatch {
@@ -430,8 +469,8 @@ func (s *state) longestMatch(curMatch int) int {
 		// Quickly reject matches that cannot be longer: bytes match+bestLen-1,
 		// match+bestLen, match, match+1 — as in C, offset 2 is implied by hash
 		// equality once offsets 0 and 1 match
-		if binary.LittleEndian.Uint16(win[match+bestLen-1:]) == scanEnd &&
-			binary.LittleEndian.Uint16(win[match:]) == scanStart {
+		if load16m(win, match+bestLen-1) == scanEnd &&
+			load16m(win, match) == scanStart {
 
 			// Compare offsets [3, maxMatch) eight bytes at a time; the last
 			// group overlaps the previous one so reads end exactly at
@@ -461,7 +500,7 @@ func (s *state) longestMatch(curMatch int) int {
 				if matchLen >= niceMatch {
 					break
 				}
-				scanEnd = binary.LittleEndian.Uint16(win[scan+bestLen-1:])
+				scanEnd = load16m(win, scan+bestLen-1)
 			}
 		}
 
@@ -680,16 +719,21 @@ func deflateFast(s *state, flush int) blockState {
 			// Insert into the hash table position by position only if the match is not too long
 			if s.matchLength <= s.maxLazyMatch /* max_insert_length */ &&
 				s.lookahead >= minMatch {
-				s.matchLength-- // string at strstart is already in the table
-				for {
-					s.strstart++
-					s.insertString(s.strstart)
-					s.matchLength--
-					if s.matchLength == 0 {
-						break
-					}
+				// Positions strstart+1 .. strstart+matchLength-1 (the string
+				// at strstart is already in the table) — exactly the set C's
+				// rolling loop inserts. insertPos computes each hash
+				// independently so consecutive inserts do not serialize on
+				// ins_h; insH is then set to hash3(last), the value C's
+				// ins_h holds after its loop, so the rolling path continues
+				// identically. matchLength >= minMatch here, so the loop
+				// always inserts at least one position.
+				last := s.strstart + s.matchLength - 1
+				for str := s.strstart + 1; str <= last; str++ {
+					s.insertPos(str)
 				}
-				s.strstart++
+				s.insH = s.hash3(last)
+				s.strstart = last + 1
+				s.matchLength = 0
 			} else {
 				s.strstart += s.matchLength
 				s.matchLength = 0
@@ -769,19 +813,29 @@ func deflateSlow(s *state, flush int) blockState {
 
 			bflush = s.tallyDist(s.strstart-1-s.prevMatch, s.prevLength-minMatch)
 
-			// Insert into the hash table all strings covered by the match
+			// Insert into the hash table all strings covered by the match:
+			// positions strstart+1 .. strstart+prevLength-2, capped at
+			// maxInsert — exactly the set C's rolling loop inserts.
+			// insertPos computes each hash independently so the inserts do
+			// not serialize on ins_h; insH is then set to hash3(last
+			// inserted), the value C's ins_h holds after its loop. If every
+			// position was skipped (last < first), C leaves ins_h untouched
+			// and so does this path.
 			s.lookahead -= s.prevLength - 1
-			s.prevLength -= 2
-			for {
-				s.strstart++
-				if s.strstart <= maxInsert {
-					s.insertString(s.strstart)
-				}
-				s.prevLength--
-				if s.prevLength == 0 {
-					break
-				}
+			end := s.strstart + s.prevLength - 2
+			first := s.strstart + 1
+			last := end
+			if last > maxInsert {
+				last = maxInsert
 			}
+			for str := first; str <= last; str++ {
+				s.insertPos(str)
+			}
+			if last >= first {
+				s.insH = s.hash3(last)
+			}
+			s.strstart = end
+			s.prevLength = 0
 			s.matchAvailable = false
 			s.matchLength = minMatch - 1
 			s.strstart++

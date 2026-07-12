@@ -7,10 +7,12 @@
 // matching, chain truncation, tie-breaks when building the Huffman trees, bit
 // emission order, block type (stored/static/dynamic) decisions — is ported
 // exactly from the zlib source. A few hot spots deviate mechanically for
-// speed (wide loads in longestMatch, SWAR in slideHash, a 64-bit bit
-// accumulator here in trees.go); each carries a comment proving the deviation
-// cannot change any output byte, and all are covered by the byte-for-byte
-// cross-check matrices.
+// speed (wide loads and masked probe loads in longestMatch, SWAR in
+// slideHash, independently computed hashes in the batch-insert loops, a
+// 64-bit bit accumulator and a register-local compressBlock here in
+// trees.go); each carries a comment proving the deviation cannot change any
+// output byte, and all are covered by the byte-for-byte cross-check
+// matrices.
 //
 // This file corresponds to zlib's trees.c.
 package zdeflate
@@ -632,35 +634,67 @@ func (s *state) trStoredBlock(buf []byte, last bool) {
 	s.pending += storedLen
 }
 
-// compressBlock sends the block data using the given trees
+// compressBlock sends the block data using the given trees.
+//
+// It emits exactly the bit sequence of the C loop (same codes, same extra
+// bits, same order), but accumulates into local copies of biBuf/biValid so
+// the compiler keeps them in registers across the symbol loop. Whole bytes
+// are moved to pendingBuf in 32-bit groups whenever 32 or more bits are
+// buffered, checked once after each code+extra pair: a pair adds at most
+// maxBits+13 == 28 bits, so biValid never exceeds 31+28 == 59 < 64 and no
+// bit is ever lost. Only the flush points differ from sendBits — as with
+// the 64-bit accumulator itself, pendingBuf receives the same bytes in the
+// same order (whole bytes drained bottom-first), so the output is unchanged.
 func (s *state) compressBlock(ltree, dtree []ctData) {
+	buf, valid, pending := s.biBuf, s.biValid, s.pending
 	if s.symNext != 0 {
-		for sx := 0; sx < s.symNext; sx++ {
-			dist := int(s.symDist[sx])
-			lc := int(s.symLc[sx])
+		symLc := s.symLc[:s.symNext]
+		symDist := s.symDist[:s.symNext]
+		for sx, lcb := range symLc {
+			dist := int(symDist[sx])
+			lc := int(lcb)
 			if dist == 0 {
-				s.sendCode(lc, ltree) // literal
+				e := ltree[lc] // literal
+				buf |= uint64(e.fc) << uint(valid)
+				valid += int(e.dl)
 			} else {
 				// lc is match length - MIN_MATCH
 				code := int(lengthCode[lc])
-				s.sendCode(code+literals+1, ltree)
-				extra := extraLbits[code]
-				if extra != 0 {
-					lc -= baseLength[code]
-					s.sendBits(lc, extra)
+				e := ltree[code+literals+1]
+				buf |= uint64(e.fc) << uint(valid)
+				valid += int(e.dl)
+				if extra := extraLbits[code]; extra != 0 {
+					buf |= uint64(lc-baseLength[code]) << uint(valid)
+					valid += extra
+				}
+				if valid >= 32 {
+					binary.LittleEndian.PutUint32(s.pendingBuf[pending:], uint32(buf))
+					pending += 4
+					buf >>= 32
+					valid -= 32
 				}
 				dist-- // dist becomes match distance - 1
 				code = dCode(dist)
-				s.sendCode(code, dtree)
-				extra = extraDbits[code]
-				if extra != 0 {
-					dist -= baseDist[code]
-					s.sendBits(dist, extra)
+				e = dtree[code]
+				buf |= uint64(e.fc) << uint(valid)
+				valid += int(e.dl)
+				if extra := extraDbits[code]; extra != 0 {
+					buf |= uint64(dist-baseDist[code]) << uint(valid)
+					valid += extra
 				}
+			}
+			if valid >= 32 {
+				binary.LittleEndian.PutUint32(s.pendingBuf[pending:], uint32(buf))
+				pending += 4
+				buf >>= 32
+				valid -= 32
 			}
 		}
 	}
-	s.sendCode(endBlock, ltree)
+	e := ltree[endBlock]
+	buf |= uint64(e.fc) << uint(valid)
+	valid += int(e.dl)
+	s.biBuf, s.biValid, s.pending = buf, valid, pending
 }
 
 // trFlushBlock decides the best encoding for the block (dynamic/static/stored) and outputs it.
