@@ -1,0 +1,38 @@
+name: Release
+
+# Creates an annotated tag at the current tip of the selected branch.
+# Direct tag pushes are not possible through the managed git remote used
+# by the development environment, so tagging goes through Actions.
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Tag to create (e.g. v1.0.0)"
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  tag:
+    name: create tag
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: create and push tag
+        # The input goes through an env var (never interpolated into the
+        # script) and is validated against a semver whitelist — this job
+        # holds a contents:write token, so shell injection must be
+        # impossible by construction.
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          if ! printf '%s' "$TAG" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+([-.][0-9A-Za-z.-]+)?$'; then
+            echo "::error::invalid tag name '$TAG' (expected semver like v1.2.3)"
+            exit 1
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -a "$TAG" -m "gzip $TAG"
+          git push origin "refs/tags/$TAG"

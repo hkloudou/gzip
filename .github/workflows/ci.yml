@@ -1,0 +1,218 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  # Unit tests + C↔Go byte-for-byte cross-check (levels 0-9 × NO_FLUSH/PARTIAL/SYNC/FULL/FINISH)
+  # includes the full header-parameter tests (Name/Comment/Extra/ModTime/Mtime/OS ×
+  # real C zlib deflateSetHeader cross-check) and the cgo bounded-memory test
+  test:
+    name: test (${{ matrix.os }}, CGO=${{ matrix.cgo }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        cgo: ["1", "0"]
+        # cgo on windows needs mingw; run pure Go mode only
+        include:
+          - os: windows-latest
+            cgo: "0"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: go vet
+        env:
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: go vet ./...
+      - name: go test
+        env:
+          CGO_ENABLED: ${{ matrix.cgo }}
+        run: go test -v ./...
+
+  # Three-way consistency safety net: the outputs of C++ native (real zlib
+  # without cgo) / Go+cgo / pure Go must match byte-for-byte. native checks
+  # both vendored zlib 1.3.1 and system zlib; the matrix covers: 8 corpus
+  # entries × 11 levels × flush positions, the full header-parameter matrix
+  # (Name/Comment/Extra combinations × OS × MTIME × level × 4 content shapes),
+  # and empty input.
+  native:
+    name: three-way cross-check (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: build native reference (vendored zlib 1.3.1 + system zlib)
+        run: |
+          mkdir -p bin
+          cc  -O2 -c internal/czlib/zlib/zlib_amalgam.c -o bin/zlib_amalgam.o -Iinternal/czlib/zlib
+          c++ -O2 -std=c++17 native/gzip_ref.cpp bin/zlib_amalgam.o -Iinternal/czlib/zlib -o bin/gzip_ref
+          c++ -O2 -std=c++17 native/gzip_ref.cpp -lz -o bin/gzip_ref_system
+          ./bin/gzip_ref version && ./bin/gzip_ref_system version
+      - name: three-way byte cross-check
+        env:
+          CGO_ENABLED: "1"
+        run: go run ./cmd/crossnative -mode check -native ./bin/gzip_ref,./bin/gzip_ref_system
+
+  # Memory safety net: run ASan+LSan over all C-layer entry points (precise
+  # leak check); go test -asan checks for memory errors under real cgo workloads
+  # (LSan doesn't understand pool references held in the Go heap, so
+  #  detect_leaks is disabled on the Go side; Go-side leaks are covered by
+  #  TestCgoMemoryBounded's bounded-RSS check)
+  # Full test suite under the Go race detector — dedicated coverage for the
+  # sync.Pool adversarial tests (concurrent cross-contamination, scratch
+  # aliasing, Writer reuse). -race requires cgo, so this runs with CGO=1.
+  race:
+    name: race detector (incl. sync.Pool stress)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: go test -race
+        env:
+          CGO_ENABLED: "1"
+          ZLIB_FUZZ_ITER: "50"
+        run: go test -race -count=1 ./...
+
+  sanitize:
+    name: ASan/LSan memory checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: C-layer leak check (LeakSanitizer)
+        run: |
+          cc -O1 -g -fsanitize=address,leak native/leak_check.c -Iinternal/czlib/zlib -o leak_check
+          ./leak_check
+      - name: native tool ASan smoke test
+        run: |
+          mkdir -p bin
+          cc -O1 -g -fsanitize=address,leak -c internal/czlib/zlib/zlib_amalgam.c -o bin/zlib_amalgam_asan.o -Iinternal/czlib/zlib
+          c++ -O1 -g -fsanitize=address,leak -std=c++17 native/gzip_ref.cpp bin/zlib_amalgam_asan.o -Iinternal/czlib/zlib -o bin/gzip_ref_asan
+          head -c 200000 /dev/urandom > /tmp/in.bin
+          ./bin/gzip_ref_asan compress 6 123 3 < /tmp/in.bin > /dev/null
+          ./bin/gzip_ref_asan compress 0 123 3 99999 < /tmp/in.bin > /dev/null
+          ./bin/gzip_ref_asan header 9 123 3 6e616d65 636f6d6d656e74 dead < /tmp/in.bin > /dev/null
+          ./bin/gzip_ref_asan bench 6 50 < /tmp/in.bin
+      - name: go test -asan (cgo path memory error check)
+        env:
+          CGO_ENABLED: "1"
+          ASAN_OPTIONS: detect_leaks=0
+          ZLIB_FUZZ_ITER: "50"
+        run: go test -asan -count=1 ./...
+
+  # Randomized fuzz cross-check: C zlib vs pure Go, byte-for-byte comparison
+  fuzz:
+    name: randomized fuzz cross-check (500 cases)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: fuzz cross-check
+        env:
+          CGO_ENABLED: "1"
+          ZLIB_FUZZ_ITER: "500"
+          ZLIB_FUZZ_MAXSIZE: "1048576"
+        run: go test ./internal/czlib/ -run TestCrossCheckFuzz -timeout 2400s -v
+
+  # Three-way benchmark: C++ native / CGO / pure Go (with memory stats).
+  # On PRs the table goes to the job summary; on push to main it is written
+  # back into the README and committed. The run is pinned to the triggering
+  # commit (checkout defaults to github.sha); it only runs when test+native
+  # are all green (no tables for failing commits).
+  bench:
+    name: benchmark native/CGO/pure Go
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    needs: [test, native]
+    # Serialize bench runs per ref so concurrent README commits to main don't conflict
+    concurrency:
+      group: bench-${{ github.ref }}
+      cancel-in-progress: false
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: build native reference
+        run: |
+          mkdir -p bin
+          cc  -O2 -c internal/czlib/zlib/zlib_amalgam.c -o bin/zlib_amalgam.o -Iinternal/czlib/zlib
+          c++ -O2 -std=c++17 native/gzip_ref.cpp bin/zlib_amalgam.o -Iinternal/czlib/zlib -o bin/gzip_ref
+      - name: run benchmarks
+        env:
+          CGO_ENABLED: "1"
+        run: |
+          go run ./cmd/crossnative -mode bench -native ./bin/gzip_ref -benchtime 2s -out bench.md
+          echo "## Three-way benchmark" >> "$GITHUB_STEP_SUMMARY"
+          cat bench.md >> "$GITHUB_STEP_SUMMARY"
+          echo "## Code size" >> "$GITHUB_STEP_SUMMARY"
+          go run ./cmd/crossnative -mode loc >> "$GITHUB_STEP_SUMMARY"
+      - name: commit README (main only)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          ok=0
+          for i in 1 2 3; do
+            # Each attempt re-patches the tables on top of the latest main
+            # (patch mode reuses bench.md, no benchmark re-run) — no rebase,
+            # so no half-finished conflict state is left behind
+            git fetch origin main
+            git checkout -B main origin/main
+            go run ./cmd/crossnative -mode patch -from bench.md -update-readme README.md
+            go run ./cmd/crossnative -mode loc -update-readme README.md
+            git add README.md
+            if git diff --cached --quiet; then
+              echo "README unchanged"; ok=1; break
+            fi
+            git commit -m "docs: auto-update benchmark & LOC tables [skip ci]"
+            if git push origin main; then ok=1; break; fi
+            echo "push failed (attempt $i), retrying..."
+          done
+          if [ "$ok" != "1" ]; then
+            echo "::error::failed to push README benchmark tables"
+            exit 1
+          fi
+
+  # Cross-platform compilability of the pure Go path
+  cross-build:
+    name: cross build (pure Go)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: cross build
+        run: |
+          for t in linux/arm64 windows/amd64 darwin/arm64 js/wasm; do
+            echo "== $t =="
+            GOOS=${t%/*} GOARCH=${t#*/} CGO_ENABLED=0 go build ./...
+          done

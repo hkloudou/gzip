@@ -1,0 +1,142 @@
+// Streaming compression API: matches the call semantics of C zlib's
+// deflate(strm, flush) — the same sequence of (input split, flush) calls
+// produces byte-identical output to C zlib.
+package zdeflate
+
+import (
+	"errors"
+	"io"
+)
+
+// Flush constants, values identical to zlib.
+const (
+	NoFlush      = zNoFlush      // Z_NO_FLUSH: just feed data, no forced block boundary
+	PartialFlush = zPartialFlush // Z_PARTIAL_FLUSH: align with an empty static block
+	SyncFlush    = zSyncFlush    // Z_SYNC_FLUSH: end block + 00 00 FF FF marker
+	FullFlush    = zFullFlush    // Z_FULL_FLUSH: like SYNC and also clears the dictionary
+	Finish       = zFinish       // Z_FINISH: finalize the stream
+)
+
+var (
+	ErrDeflaterClosed = errors.New("zdeflate: deflater closed")
+	ErrAfterFinish    = errors.New("zdeflate: deflate called after finish")
+	errInvalidFlush   = errors.New("zdeflate: invalid flush value")
+)
+
+// streamChunk: internal chunk size when level>0. Under Z_NO_FLUSH, zlib's
+// output depends only on the data content and flush points, not on how
+// avail_in is split (trailing lookahead < MIN_LOOKAHEAD is not processed
+// under NO_FLUSH), so internal chunking does not affect the output bytes;
+// it only lets us use a fixed-size output buffer. level=0 (stored) output
+// depends on avail_in/avail_out, so to match C it must be processed as a
+// whole, without chunking.
+const streamChunk = 1 << 18 // 256KB
+
+// Deflater is a streaming raw deflate compressor (windowBits=-15,
+// memLevel=8, default strategy), corresponding to one long-lived z_stream.
+// Not safe for concurrent use.
+type Deflater struct {
+	s      *state
+	closed bool
+}
+
+// NewDeflater creates a streaming compressor. Levels match zlib: -1 means
+// default (6), otherwise 0-9.
+func NewDeflater(level int) (*Deflater, error) {
+	if level == -1 {
+		level = 6
+	}
+	if level < 0 || level > 9 {
+		return nil, errors.New("zdeflate: invalid compression level")
+	}
+	d := &Deflater{s: statePool.Get().(*state)}
+	d.s.reset(level)
+	return d, nil
+}
+
+// Deflate is equivalent to C's deflate(strm, flush) (with avail_out always
+// sufficient): it processes all bytes of p and writes the produced
+// compressed data to w.
+//
+//   - flush=NoFlush: just feed data (corresponds to multiple Writes)
+//   - flush=SyncFlush: end the current block and write the 00 00 FF FF sync marker
+//   - flush=Finish: end the whole stream
+//
+// The same sequence of (p, flush) calls as C zlib yields byte-identical output.
+func (d *Deflater) Deflate(p []byte, flush int, w io.Writer) error {
+	if d.closed {
+		return ErrDeflaterClosed
+	}
+	if flush < NoFlush || flush > Finish {
+		return errInvalidFlush
+	}
+	s := d.s
+	if s.status == finishState && (len(p) > 0 || flush != Finish) {
+		return ErrAfterFinish
+	}
+
+	for first := true; first || len(p) > 0; first = false {
+		chunk := p
+		// For level>0, split internally into streamChunk-sized pieces
+		// (no effect on output, see the constant's comment)
+		if s.level > 0 && len(chunk) > streamChunk {
+			chunk = p[:streamChunk]
+		}
+		p = p[len(chunk):]
+
+		f := flush
+		if len(p) > 0 {
+			f = NoFlush // only the last internal chunk applies the caller's flush
+		}
+
+		need := Bound(len(chunk)+2*wSize) + 64
+		out := getScratch(need)
+		s.in = chunk
+		s.inPos = 0
+		s.out = out
+		s.outPos = 0
+
+		// With sufficient avail_out a single deflateOnce consumes all
+		// input; keep the progress check anyway to guard against data loss
+		for {
+			before := s.inPos
+			s.deflateOnce(f)
+			if s.availIn() == 0 {
+				break
+			}
+			if s.inPos == before {
+				s.in = nil
+				s.out = nil
+				putScratch(out)
+				return errors.New("zdeflate: internal error: no progress")
+			}
+		}
+
+		n := s.outPos
+		s.in = nil
+		s.out = nil
+		if n > 0 {
+			if _, err := w.Write(out[:n]); err != nil {
+				putScratch(out)
+				return err
+			}
+		}
+		putScratch(out)
+	}
+	return nil
+}
+
+// Close releases the internal state (returns it to the pool). The Deflater
+// must not be used afterwards.
+func (d *Deflater) Close() error {
+	if d.closed {
+		return nil
+	}
+	d.closed = true
+	s := d.s
+	d.s = nil
+	s.in = nil
+	s.out = nil
+	statePool.Put(s)
+	return nil
+}

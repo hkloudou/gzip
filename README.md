@@ -1,0 +1,245 @@
+# gzip — byte-identical-to-zlib GZIP compression for Go
+
+[![CI](https://github.com/hkloudou/gzip/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/hkloudou/gzip/actions/workflows/ci.yml)
+[![Go Reference](https://pkg.go.dev/badge/github.com/hkloudou/gzip.svg)](https://pkg.go.dev/github.com/hkloudou/gzip)
+![Go Version](https://img.shields.io/badge/go-%3E%3D1.21-blue)
+![Pure Go](https://img.shields.io/badge/100%25-Pure%20Go-success)
+
+Go's standard `compress/gzip` (backed by `compress/flate`) implements the
+compression algorithm differently from C zlib: **the same input produces
+different compressed bytes**. Meanwhile iOS, Java (OpenJDK) and most other
+ecosystems ship GZIP built on standard zlib. Whenever a system needs
+byte-level comparison of compressed output (signatures, cache keys,
+deduplication, incremental diffs), Go is the odd one out.
+
+This library produces GZIP output **byte-identical to zlib**. The product is
+**100% pure Go** (a line-by-line port of zlib's deflate, `internal/zdeflate`):
+no cgo, no external dependencies, cross-compiles anywhere (including
+js/wasm), and emits exactly the same bytes on every platform and build mode.
+
+Consistency is enforced by three layers of test infrastructure (never part
+of the product build — tests/CI only):
+
+| Reference | Location | Purpose |
+|---|---|---|
+| Embedded official zlib 1.3.1 C sources | `internal/czlib` (cgo, test-only) | Byte-for-byte cross-check against real C zlib when tests run with `CGO_ENABLED=1` |
+| C++ native tool | `native/gzip_ref.cpp` (separate process, no cgo) | Third-party referee for the CI three-way cross-check (vendored 1.3.1 + system zlib variants) |
+| Randomized fuzz + streaming matrices | `internal/czlib` tests | Levels 0-9 × large corpora × random fuzz cross-checks (`make test` / `make fuzz`) |
+
+## Usage
+
+### 1. Drop-in migration from the standard library
+
+```go
+import gzip "github.com/hkloudou/gzip"
+
+func compress(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	writer := gzip.NewWriter(&buf) // or gzip.NewWriterLevel(&buf, 9)
+	if _, err := writer.Write(data); err != nil {
+		return nil, err
+	}
+	if err := writer.Close(); err != nil { // must Close, or the stream is incomplete
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+```
+
+Behavior is fully aligned with C zlib (whatever C allows, this library
+allows, with identical bytes):
+
+- `Write` = `deflate(Z_NO_FLUSH)`: streaming incremental compression, the
+  input is never buffered in full. zlib guarantees that under `Z_NO_FLUSH`
+  the output is independent of how the input is sliced (level > 0), so
+  without Flush the output is byte-identical to one-shot compression;
+- `Flush` = `deflate(Z_SYNC_FLUSH)`: terminates the current block and emits
+  the `00 00 FF FF` sync marker, exactly like C. Flush positions become part
+  of the output bytes (same in C) — when comparing across languages either
+  neither side flushes or both flush at the same offsets;
+- `Close` = `deflate(Z_FINISH)` + the GZIP trailer.
+
+Differences from the standard library (all in service of matching zlib
+output):
+
+- Compression levels follow zlib: `-1` is zlib's `Z_DEFAULT_COMPRESSION`
+  (internally 6; Java's `Deflater.DEFAULT_COMPRESSION` and Go's
+  `gzip.DefaultCompression` are also -1), plus `0`-`9`; the stdlib-specific
+  `HuffmanOnly(-2)` is not supported;
+- Header defaults are `OS=3` (Unix), `XFL=0`, `MTIME=0` (stdlib defaults to
+  `OS=255` and writes `XFL=4/2` at levels 1/9; zlib's `deflateSetHeader`
+  path also writes level-dependent XFL — this library deliberately pins XFL
+  to 0 for stable headers across all levels; XFL is a hint field and does
+  not affect decompression);
+- The extra `writer.Mtime` (uint32) is a design specific to this library:
+  it sets the raw GZIP MTIME seconds directly and takes priority over
+  `ModTime` when non-zero, bypassing `time.Time` conversions;
+- Decompression (`NewReader`/`Reader`) forwards to the standard library
+  (decompression has no byte-consistency problem).
+
+### 2. Customizing the header
+
+`Header` has exactly the same field set as the standard library's
+`compress/gzip.Header` (`Comment`/`Extra`/`ModTime`/`Name`/`OS`), written
+per RFC 1952 as FEXTRA/FNAME/FCOMMENT. All header parameters are set
+directly on the `Writer` (the one-shot API has been removed — the Writer is
+everything; the equivalent of the old `zlib.Compress(data, ts)` is shown
+below):
+
+```go
+var buf bytes.Buffer
+w := gzip.NewWriterLevel(&buf, 6)   // level -1, 0-9, same as zlib
+w.Mtime = 1751038273                // library-specific: raw MTIME seconds
+                                    // (wins over ModTime when non-zero)
+w.ModTime = time.Now()              // or the stdlib way (pre-1970 writes 0)
+w.OS = 3                            // default 3 (Unix), customizable
+w.Name = "data.json"                // FNAME (NUL-terminated Latin-1, as stdlib)
+w.Comment = "naïve café"            // FCOMMENT
+w.Extra = []byte{0xde, 0xad}        // FEXTRA (≤65535 bytes)
+w.Write(data)
+w.Close()
+```
+
+With all optional fields zero (only Mtime set) the output layout is:
+
+```
+[10-byte header: 1f 8b 08 00 <mtime LE> 00 <os>][raw deflate][crc32 LE][isize LE]
+```
+
+These fields are cross-checked byte-for-byte against real C zlib's
+`deflateSetHeader` (`gz_header`) output (CI full-parameter matrix: field
+combinations × OS × MTIME × level × multiple corpora); the only deliberate
+difference is the XFL byte (see above).
+
+Note: because of the extra `Mtime` field, this library's `Header` is a
+different type from the stdlib's — field-by-field assignment is compatible,
+whole-struct assignment (`zw.Header = zr.Header`) does not compile. Use
+`w.SetHeader(r.Header)` for recompression flows that carry headers over.
+
+Migrating from the removed one-shot API (byte-identical output):
+
+```go
+// formerly zlib.Compress(data, timestamp) / zlib.CompressLevel(data, ts, 9)
+func compress(data []byte, ts uint32, level int) ([]byte, error) {
+	var buf bytes.Buffer
+	w, err := gzip.NewWriterLevel(&buf, level)
+	if err != nil {
+		return nil, err
+	}
+	w.Mtime = ts
+	if _, err := w.Write(data); err != nil {
+		return nil, err
+	}
+	if err := w.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+```
+
+## Byte-level zlib compatibility across platforms
+
+| Platform | Byte-identical to standard zlib? | Notes |
+|---|---|---|
+| iOS/macOS system libz (`deflate()`) | ✅ identical | **Verified in CI** (macOS 15.7 arm64, system libz 1.2.12, called via dlopen): all levels 0-9 byte-identical to this library. Apple's changes are limited to inflate/checksum acceleration; the gzip header OS byte is 19 on Apple platforms, which this library sidesteps by writing OS=3 itself |
+| Apple Compression framework (`COMPRESSION_ZLIB`) | ⚠️ measured = zlib level 9, not guaranteed | Apple only promises raw DEFLATE and describes it as a "level 5 equivalent"; **CI measurements** (macOS 15.7 arm64) show its output is actually byte-identical to standard zlib **level 9** (not 5). This is an unpromised implementation detail that may change with OS versions — CI re-measures every run and reports the matching level in logs |
+| Java `java.util.zip.Deflater` (OpenJDK) | ✅ identical | Bundles/links official zlib (except distros like Fedora 40+ that switched to zlib-ng) |
+| Android 13+ | ✅ identical | Chromium fork with the zlib-compatible hash enabled (fixed for OTA incremental updates) |
+| Android 11–12L | ❌ different | The Chromium fork's CRC32C hash produces valid but non-canonical output |
+| Chrome's bundled zlib | ❌ different | Non-canonical hash by default |
+| Go `compress/gzip` | ❌ different | Its own flate implementation — the reason this library exists |
+
+## Testing and performance
+
+```bash
+make test        # full test suite in both build modes
+make native      # three-way byte-for-byte cross-check
+make fuzz        # heavy randomized cross-check (C zlib vs pure Go)
+make bench-table # benchmark table (C++ native / CGO / pure Go / std Go)
+make leak-check  # C-layer ASan/LSan leak check
+```
+
+Every push runs [GitHub Actions](.github/workflows/ci.yml) as the final
+consistency backstop (click the badge above for live results):
+
+| CI job | Coverage |
+|---|---|
+| test (ubuntu/macos × CGO 0/1 + windows) | Full unit tests (the product is pure Go; CGO only decides whether the real-C-zlib comparison leg runs) + C↔Go cross-checks: levels 0-9 × flush types (NO_FLUSH/PARTIAL/SYNC/FULL/FINISH) full matrix, golden vectors, streaming call sequences, Writer behavior, **all header parameters × real C zlib `deflateSetHeader`**, cgo memory-bounded test |
+| native (ubuntu/macos) | **Three-way byte-for-byte cross-check**: C++ native (real zlib without cgo; vendored 1.3.1 and system zlib variants) vs Go+cgo vs pure Go. Matrix: 8 corpora × 11 levels × flush positions + MTIME × OS dimensions + all header parameters + empty input |
+| race | Full test suite under the Go race detector, including dedicated `sync.Pool` adversarial tests (concurrent cross-contamination, scratch aliasing, Writer reuse) |
+| sanitize | ASan + LeakSanitizer over every C entry point; `go test -asan` for memory errors under real cgo workloads |
+| fuzz | 500 random inputs × random levels, C zlib vs pure Go byte comparison |
+| bench | Four-way benchmark (C++ native / CGO / pure Go / std Go, with memory stats); auto-updates the table below on push to main |
+| cross-build | Pure-Go cross-compilation for linux/arm64, windows, darwin/arm64, js/wasm |
+
+### Benchmark (auto-updated by CI)
+
+<!-- AUTOBENCH:BEGIN -->
+Level 6, each op is a full compression (reset + deflate + CRC + gzip framing); every column reuses compressor state (C++ via deflateReset, the Go columns via sync.Pool / Writer.Reset).
+
+- **C++ Native**: real zlib 1.3.1 looping in-process, no cgo boundary — the C-side performance ceiling
+- **CGO**: the embedded-zlib test reference (internal/czlib)
+- **Pure Go**: this library
+- **Std Go**: the standard library compress/gzip — speed context only; its output bytes differ by design, which is the reason this library exists
+
+**Speed** (ratios are relative speed of Pure Go; higher = Pure Go faster):
+
+| Input | C++ Native | CGO | Pure Go | Std Go | Pure Go / CGO | Pure Go / Std Go |
+|---|---|---|---|---|---|---|
+| 2 B | 1.9 µs/op | 2.2 µs/op | 2.4 µs/op | 11.1 µs/op | 0.93× | **4.68× faster** |
+| 198 B JSON token | 7.5 µs/op | 8.0 µs/op | 8.7 µs/op | 21.2 µs/op | 0.92× | **2.45× faster** |
+| 2 KB JSON | 11.8 µs/op | 11.1 µs/op | 9.9 µs/op | 20.2 µs/op | 1.13× | **2.06× faster** |
+| 64 KB JSON | 302.2 µs (217 MB/s) | 315.6 µs (208 MB/s) | 250.6 µs (261 MB/s) | 178.8 µs (367 MB/s) | **1.26× faster** | 0.71× |
+| 1 MB JSON | 10.1 ms (104 MB/s) | 10.0 ms (105 MB/s) | 10.9 ms (96 MB/s) | 7.1 ms (147 MB/s) | 0.92× | 0.65× |
+| 1 MB random (incompressible) | 23.8 ms (44 MB/s) | 23.8 ms (44 MB/s) | 28.8 ms (36 MB/s) | 18.4 ms (57 MB/s) | 0.83× | 0.64× |
+
+**Memory** (Go heap per op; C-side buffers of the CGO column are invisible to Go heap stats; Std Go compresses into a reused bytes.Buffer while the other Go columns return a fresh exact-size slice per op):
+
+| Input | CGO | Pure Go | Std Go |
+|---|---|---|---|
+| 2 B | 32 B · 3 allocs | 48 B · 2 allocs | 0 B · 0 allocs |
+| 198 B JSON token | 404 B · 3 allocs | 234 B · 2 allocs | 0 B · 0 allocs |
+| 2 KB JSON | 180 B · 3 allocs | 124 B · 2 allocs | 0 B · 0 allocs |
+| 64 KB JSON | 580 B · 3 allocs | 354 B · 2 allocs | 0 B · 0 allocs |
+| 1 MB JSON | 272.0 KB · 3 allocs | 154.6 KB · 2 allocs | 0 B · 0 allocs |
+| 1 MB random (incompressible) | 2.0 MB · 4 allocs | 1.0 MB · 2 allocs | 0 B · 0 allocs |
+
+*2026-07-12 01:32 UTC · AMD EPYC 7763 64-Core Processor · go 1.26.5 · linux/amd64 · commit `0baa0cb` (auto-updated by CI on push to main)*
+<!-- AUTOBENCH:END -->
+
+With the cgo-side compressor-stream pooling (see "Memory notes") CGO is
+roughly on par with C++ native; the pure Go port runs at about 80-95% of C.
+Its value is zero cgo: cross-compile anywhere, js/wasm support, no C
+toolchain. The standard-library column is performance-only context — its
+output bytes differ by design, which is the reason this library exists.
+
+### Code size (auto-counted by CI)
+
+<!-- AUTOLOC:BEGIN -->
+| Category | Files | Go lines |
+|---|---|---|
+| Product (root package + internal/zdeflate, pure Go) | 5 | 2215 |
+| Tests (*_test.go) | 8 | 1844 |
+| Test infrastructure (internal/czlib + cmd, non-test) | 5 | 1296 |
+
+*(tests + infrastructure) : product ≈ 1.4 : 1 (test-only vendored zlib C sources and the C++ native tool are not counted; auto-updated by CI on push to main)*
+<!-- AUTOLOC:END -->
+
+## Memory notes
+
+- Compressor state (window/hash tables/symbol buffers, ~320KB measured) is
+  reused via `sync.Pool` — zero steady-state allocations. Pool correctness
+  gets dedicated adversarial tests (concurrent cross-contamination, scratch
+  aliasing, Writer reuse) run under the race detector in CI;
+- `gzip.Writer` is truly streaming: `Write` compresses incrementally and
+  pushes downstream without buffering the whole input (O(1) memory for
+  large files); internal output scratch is pooled too;
+- The test reference implementation (`internal/czlib`, never in the product
+  build) pools C-side compressor streams as well, reclaimed by GC
+  finalizers as a backstop; inputs beyond 4GiB-1 (32-bit `avail_in`) fail
+  loudly instead of truncating silently;
+- Memory safety has three layers of coverage: precise ASan/LeakSanitizer
+  checks over every C entry point (CI sanitize job), `go test -asan` under
+  real workloads, and an RSS-bounded test;
+- The legacy WASM runtime (wazero, resident with a global mutex) is long
+  gone.
