@@ -1,0 +1,21 @@
+# binaries and build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+coverage.*
+*.coverprofile
+profile.cov
+
+# Go workspace files
+go.work
+go.work.sum
+
+# env files
+.env
+
+# local build artifacts (native reference tools etc.)
+bin/
