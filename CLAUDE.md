@@ -13,17 +13,25 @@ speculative abstractions, no unnecessary API surface.
    `zlib_amalgam.c` is an amalgamated compilation unit added by this
    repository). The cross-checks are only meaningful because the reference
    is pristine — upgrading the version wholesale is fine, editing its
-   content is not.
+   content is not. CI enforces this: the native job downloads the official
+   zlib 1.3.1 tarball (pinned SHA-256), verifies every vendored file is
+   byte-identical to it, and builds one referee binary directly from the
+   tarball so the "correct answer" never depends on this repository's copy.
 
 2. **The pure Go port must match C's logic exactly.** `internal/zdeflate`
    is a line-by-line counterpart of `deflate.c`/`trees.c`: read the
    corresponding C code before changing any compression logic, and every
    change must pass the full byte-for-byte cross-checks (locally:
-   `make test && make native`). The single intentional byte-level
-   exception is the gzip header XFL byte: zlib's deflateSetHeader path
-   writes 2/4/0 depending on level, while this library **always writes 0**
-   for stable headers — the comparison code fixes up byte 8 before
-   comparing; do not "helpfully" change it to follow zlib.
+   `make test && make native`). Mechanical, output-invariant speedups
+   (wide loads, SWAR, the 64-bit bit accumulator) are permitted only at
+   proven-hot spots and each must carry a comment proving no output byte
+   can change; algorithmic decision points (match acceptance, flush
+   decisions, tie-breaks) must remain exactly C's. The single intentional
+   byte-level exception is the gzip header XFL byte: zlib's
+   deflateSetHeader path writes 2/4/0 depending on level, while this
+   library **always writes 0** for stable headers — the comparison code
+   fixes up byte 8 before comparing; do not "helpfully" change it to
+   follow zlib.
 
 3. **The three-way cross-check, fuzz, and benchmarks are the skeleton of
    this repository and must never be reduced:**

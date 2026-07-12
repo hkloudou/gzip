@@ -128,6 +128,133 @@ func TestPoolConcurrentNoCrossContamination(t *testing.T) {
 	}
 }
 
+// TestPoolStressChunkBoundary hammers the pooled state and scratch buffers
+// with payloads straddling the internal streamChunk boundary (256KB) —
+// split across two Writes with a Flush in between, on Writers reused via
+// Reset, concurrently and desynchronized across workers. Every output must
+// equal the serially precomputed expectation byte-for-byte and round-trip.
+// Catches pool cross-contamination that only shows up when the streaming
+// path re-enters getScratch/putScratch multiple times per payload.
+func TestPoolStressChunkBoundary(t *testing.T) {
+	const chunk = 1 << 18 // keep in sync with zdeflate's streamChunk
+	sizes := []int{chunk - 1, chunk, chunk + 1, 2*chunk + 12345}
+	levels := []int{0, 1, 6, 9}
+	if testing.Short() {
+		sizes = sizes[:2]
+		levels = []int{0, 6}
+	}
+
+	type job struct {
+		data    []byte
+		level   int
+		flushAt int
+		want    []byte
+	}
+
+	// The exact (Write, Flush, Write, Close) sequence is what defines the
+	// expected bytes (flush points are part of the deflate output contract),
+	// so expectations are precomputed serially with the identical sequence.
+	run := func(w *Writer, dst *bytes.Buffer, j job) error {
+		w.Reset(dst)
+		w.Mtime = uint32(j.flushAt)
+		if _, err := w.Write(j.data[:j.flushAt]); err != nil {
+			return err
+		}
+		if err := w.Flush(); err != nil {
+			return err
+		}
+		if _, err := w.Write(j.data[j.flushAt:]); err != nil {
+			return err
+		}
+		return w.Close()
+	}
+
+	rng := rand.New(rand.NewSource(20260712))
+	var jobs []job
+	for _, size := range sizes {
+		for _, level := range levels {
+			data := make([]byte, size)
+			switch level % 3 {
+			case 0:
+				pattern := []byte(fmt.Sprintf(`{"size":%d,"level":%d,"pad":"0123456789abcdef"},`, size, level))
+				for p := 0; p < size; p += len(pattern) {
+					copy(data[p:], pattern)
+				}
+			case 1:
+				rng.Read(data)
+			default:
+				for p := range data {
+					data[p] = byte(p >> 10)
+				}
+			}
+			j := job{data: data, level: level, flushAt: 1 + rng.Intn(size-1)}
+			var buf bytes.Buffer
+			w, err := NewWriterLevel(io.Discard, level)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := run(w, &buf, j); err != nil {
+				t.Fatal(err)
+			}
+			j.want = buf.Bytes()
+			jobs = append(jobs, j)
+		}
+	}
+
+	workers := runtime.GOMAXPROCS(0) * 2
+	var wg sync.WaitGroup
+	errs := make(chan error, workers)
+	for wkr := 0; wkr < workers; wkr++ {
+		wg.Add(1)
+		go func(wkr int) {
+			defer wg.Done()
+			// one reused Writer per level per worker (Reset keeps the level)
+			ws := make(map[int]*Writer)
+			for n := 0; n < len(jobs); n++ {
+				j := jobs[(n+wkr)%len(jobs)] // desynchronize workers
+				w := ws[j.level]
+				if w == nil {
+					var err error
+					if w, err = NewWriterLevel(io.Discard, j.level); err != nil {
+						errs <- err
+						return
+					}
+					ws[j.level] = w
+				}
+				var buf bytes.Buffer
+				if err := run(w, &buf, j); err != nil {
+					errs <- err
+					return
+				}
+				if !bytes.Equal(buf.Bytes(), j.want) {
+					errs <- fmt.Errorf("worker %d: size=%d level=%d flushAt=%d: output differs from precomputed (pool cross-contamination?)",
+						wkr, len(j.data), j.level, j.flushAt)
+					return
+				}
+				r, err := NewReader(bytes.NewReader(buf.Bytes()))
+				if err != nil {
+					errs <- err
+					return
+				}
+				got, err := io.ReadAll(r)
+				if err != nil {
+					errs <- err
+					return
+				}
+				if !bytes.Equal(got, j.data) {
+					errs <- fmt.Errorf("worker %d: size=%d level=%d: round-trip mismatch", wkr, len(j.data), j.level)
+					return
+				}
+			}
+		}(wkr)
+	}
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		t.Fatal(err)
+	}
+}
+
 // TestPoolResultNotAliased ensures one-shot results do not alias pooled
 // scratch buffers: a captured result must stay intact while subsequent
 // compressions reuse (and overwrite) the pool.

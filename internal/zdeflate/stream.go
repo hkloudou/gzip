@@ -90,7 +90,8 @@ func (d *Deflater) Deflate(p []byte, flush int, w io.Writer) error {
 		}
 
 		need := Bound(len(chunk)+2*wSize) + 64
-		out := getScratch(need)
+		op := getScratch(need)
+		out := *op
 		s.in = chunk
 		s.inPos = 0
 		s.out = out
@@ -107,7 +108,7 @@ func (d *Deflater) Deflate(p []byte, flush int, w io.Writer) error {
 			if s.inPos == before {
 				s.in = nil
 				s.out = nil
-				putScratch(out)
+				putScratch(op)
 				return errors.New("zdeflate: internal error: no progress")
 			}
 		}
@@ -117,11 +118,11 @@ func (d *Deflater) Deflate(p []byte, flush int, w io.Writer) error {
 		s.out = nil
 		if n > 0 {
 			if _, err := w.Write(out[:n]); err != nil {
-				putScratch(out)
+				putScratch(op)
 				return err
 			}
 		}
-		putScratch(out)
+		putScratch(op)
 	}
 	return nil
 }

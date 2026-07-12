@@ -53,6 +53,49 @@ int main(void) {
     assert(r);
     free(r);
 
+    /* deflateSetHeader with randomized parameters (deterministic LCG):
+       name/comment length edges with high Latin-1 bytes, extra
+       absent / empty-present / up to the 65535 boundary, MTIME and OS
+       extremes, all levels — the C header path must stay leak-free and
+       in-bounds for every parameter shape */
+    {
+        static const int str_lens[4] = {0, 1, 255, 1024};
+        static const uint32_t mtimes[4] = {0u, 1u, 0x7fffffffu, 0xffffffffu};
+        static const int oses[4] = {0, 3, 11, 255};
+        static uint8_t extra_buf[65535];
+        static char name_buf[1025], comment_buf[1025];
+        uint32_t rs = 0x13572468u;
+#define LC_NEXT() (rs = rs * 1664525u + 1013904223u)
+        for (size_t i = 0; i < sizeof(extra_buf); i++) {
+            extra_buf[i] = (uint8_t)LC_NEXT();
+        }
+        for (int i = 0; i < 60; i++) {
+            int name_len = str_lens[LC_NEXT() % 4];
+            int comment_len = str_lens[LC_NEXT() % 4];
+            for (int j = 0; j < name_len; j++) name_buf[j] = (char)(1 + LC_NEXT() % 255);
+            name_buf[name_len] = 0;
+            for (int j = 0; j < comment_len; j++) comment_buf[j] = (char)(1 + LC_NEXT() % 255);
+            comment_buf[comment_len] = 0;
+
+            int extra_mode = (int)(LC_NEXT() % 3); /* 0: absent, 1: empty-present, 2: random */
+            uint32_t extra_len = extra_mode == 2 ? LC_NEXT() % 65536u : 0u;
+            const uint8_t* extra = extra_mode ? extra_buf : NULL;
+
+            uint32_t mtime = mtimes[LC_NEXT() % 4];
+            int osb = oses[LC_NEXT() % 4];
+            int level = (int)(LC_NEXT() % 11) - 1;
+            size_t len = 1000 + LC_NEXT() % 20000;
+
+            uint8_t* o = gzip_compress_header(data, len, level, mtime, (uint8_t)osb,
+                                              extra, extra_len,
+                                              name_len ? name_buf : NULL,
+                                              comment_len ? comment_buf : NULL);
+            assert(o);
+            free(o);
+        }
+#undef LC_NEXT
+    }
+
     /* empty input and failure paths must not leak */
     r = gzip_compress_sync(data, 0, 0u, 6, 3, 0);
     assert(r);

@@ -2,7 +2,12 @@
 // Z_DEFAULT_STRATEGY, i.e. the default zlib parameters in the iOS/Java ecosystems).
 package zdeflate
 
-import "sync"
+import (
+	"encoding/binary"
+	"math/bits"
+	"sync"
+	"unsafe"
+)
 
 const (
 	minMatch = 3
@@ -137,7 +142,7 @@ type state struct {
 	optLen    uint64
 	staticLen uint64
 
-	biBuf   uint16 // bit output buffer, least significant bits first
+	biBuf   uint64 // bit output accumulator, least significant bits first
 	biValid int    // number of valid bits in biBuf
 
 	status    int // busyState / finishState
@@ -272,31 +277,42 @@ func (s *state) updateHash(h uint32, c byte) uint32 {
 
 // insertString corresponds to the INSERT_STRING macro, returns the previous chain head (match_head)
 func (s *state) insertString(str int) int {
-	s.insH = s.updateHash(s.insH, s.window[str+minMatch-1])
-	matchHead := int(s.head[s.insH])
-	s.prev[str&wMask] = s.head[s.insH]
-	s.head[s.insH] = uint16(str)
-	return matchHead
+	h := ((s.insH << hashShift) ^ uint32(s.window[str+minMatch-1])) & hashMask
+	s.insH = h
+	matchHead := s.head[h]
+	s.prev[str&wMask] = matchHead
+	s.head[h] = uint16(str)
+	return int(matchHead)
 }
 
-// slideHash shifts the hash tables in step when the window slides down
+// slideHash shifts the hash tables in step when the window slides down.
+// Each entry becomes m >= wSize ? m-wSize : nilPos(0); wSize is 1<<15, so the
+// condition is exactly the top bit of the 16-bit entry. (For prev, entries not
+// on any hash chain are garbage but are never read, as in C.)
 func (s *state) slideHash() {
-	for i := hashSize - 1; i >= 0; i-- {
-		m := s.head[i]
-		if m >= wSize {
-			s.head[i] = m - wSize
-		} else {
-			s.head[i] = nilPos
+	slideTable(s.head[:])
+	slideTable(s.prev[:])
+}
+
+// slideTable applies the slide to every entry branch-free. C compilers
+// vectorize the equivalent zlib loop into saturating-subtract SIMD; Go does
+// not auto-vectorize, so when the table is 8-byte aligned the entries are
+// processed four at a time as uint16 lanes of a uint64: lanes with the top
+// bit set become lane-0x8000, all others become 0. Shifts and borrows cannot
+// cross a lane (t has only bit 15 of each lane set), and lanes map to entries
+// in memory order regardless of endianness, so the result is identical to the
+// scalar loop. Both tables have a multiple-of-four length (wSize and hashSize).
+func slideTable(tab []uint16) {
+	if uintptr(unsafe.Pointer(&tab[0]))&7 == 0 {
+		w := unsafe.Slice((*uint64)(unsafe.Pointer(&tab[0])), len(tab)/4)
+		for i, v := range w {
+			t := v & 0x8000800080008000
+			w[i] = v & (t - t>>15)
 		}
+		return
 	}
-	for i := wSize - 1; i >= 0; i-- {
-		m := s.prev[i]
-		if m >= wSize {
-			s.prev[i] = m - wSize
-		} else {
-			// if i is not on any hash chain, prev[i] is garbage but is never read
-			s.prev[i] = nilPos
-		}
+	for i, m := range tab {
+		tab[i] = (m - wSize) & -(m >> 15)
 	}
 }
 
@@ -375,7 +391,11 @@ func zeroRange(b []byte) {
 }
 
 // longestMatch finds the longest match starting at curMatch, sets matchStart and
-// returns its length, at most lookahead. Line-by-line port of the C version (non-UNALIGNED_OK).
+// returns its length, at most lookahead. Port of the C version with wider loads:
+// the byte loop is replaced by 8-byte XOR compares whose first differing byte
+// (via TrailingZeros64) is exactly the byte the C loop stops at, and the four
+// quick-reject byte compares become two 16-bit compares of the same bytes —
+// the returned length, and therefore the compressed output, is unchanged.
 func (s *state) longestMatch(curMatch int) int {
 	chainLength := s.maxChainLength
 	scan := s.strstart
@@ -385,10 +405,12 @@ func (s *state) longestMatch(curMatch int) int {
 	if s.strstart > maxDistance {
 		limit = s.strstart - maxDistance
 	}
-	win := &s.window
+	win := s.window[:]
+	prev := &s.prev
 
-	scanEnd1 := win[scan+bestLen-1]
-	scanEnd := win[scan+bestLen]
+	// Same bytes as the C scan_end1/scan_end pair and the match head pair
+	scanStart := binary.LittleEndian.Uint16(win[scan:])
+	scanEnd := binary.LittleEndian.Uint16(win[scan+bestLen-1:])
 
 	// Reduce the search effort when we already have a good match
 	if s.prevLength >= s.goodMatch {
@@ -401,19 +423,35 @@ func (s *state) longestMatch(curMatch int) int {
 
 	for {
 		match := curMatch
+		// Load the next chain link before the compares so the (serially
+		// dependent) table read overlaps with the window reads below
+		next := int(prev[match&wMask])
 
-		// Quickly reject matches that cannot be longer. The C version starts
-		// comparing at offset 3 (offset 2 is implied by hash equality); same here
-		if win[match+bestLen] == scanEnd &&
-			win[match+bestLen-1] == scanEnd1 &&
-			win[match] == win[scan] &&
-			win[match+1] == win[scan+1] {
+		// Quickly reject matches that cannot be longer: bytes match+bestLen-1,
+		// match+bestLen, match, match+1 — as in C, offset 2 is implied by hash
+		// equality once offsets 0 and 1 match
+		if binary.LittleEndian.Uint16(win[match+bestLen-1:]) == scanEnd &&
+			binary.LittleEndian.Uint16(win[match:]) == scanStart {
 
+			// Compare offsets [3, maxMatch) eight bytes at a time; the last
+			// group overlaps the previous one so reads end exactly at
+			// scan+maxMatch, inside the window: strstart never exceeds
+			// windowSize-minLookahead (zlib's "need lookahead" invariant), and
+			// bytes past the input are zeroed by fillWindow up to highWater
 			matchLen := maxMatch
-			for j := 3; j < maxMatch; j++ {
-				if win[scan+j] != win[match+j] {
-					matchLen = j
+			for j := 3; ; {
+				x := binary.LittleEndian.Uint64(win[scan+j:]) ^
+					binary.LittleEndian.Uint64(win[match+j:])
+				if x != 0 {
+					matchLen = j + bits.TrailingZeros64(x)>>3
 					break
+				}
+				if j == maxMatch-8 {
+					break
+				}
+				j += 8
+				if j > maxMatch-8 {
+					j = maxMatch - 8
 				}
 			}
 
@@ -423,12 +461,11 @@ func (s *state) longestMatch(curMatch int) int {
 				if matchLen >= niceMatch {
 					break
 				}
-				scanEnd1 = win[scan+bestLen-1]
-				scanEnd = win[scan+bestLen]
+				scanEnd = binary.LittleEndian.Uint16(win[scan+bestLen-1:])
 			}
 		}
 
-		curMatch = int(s.prev[curMatch&wMask])
+		curMatch = next
 		if curMatch <= limit {
 			break
 		}

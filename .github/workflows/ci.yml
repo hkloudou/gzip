@@ -38,11 +38,17 @@ jobs:
         run: go test -v ./...
 
   # Three-way consistency safety net: the outputs of C++ native (real zlib
-  # without cgo) / Go+cgo / pure Go must match byte-for-byte. native checks
-  # both vendored zlib 1.3.1 and system zlib; the matrix covers: 8 corpus
-  # entries × 11 levels × flush positions, the full header-parameter matrix
-  # (Name/Comment/Extra combinations × OS × MTIME × level × 4 content shapes),
-  # and empty input.
+  # without cgo) / Go+cgo / pure Go must match byte-for-byte. The native
+  # referee is built three ways — from the OFFICIAL zlib 1.3.1 tarball
+  # (pinned SHA-256, downloaded from zlib.net / the madler/zlib release;
+  # this leg is the deterministic correct answer, fully independent of this
+  # repository's vendored copy), from the vendored sources, and against the
+  # system zlib. Before anything runs, the vendored sources are verified
+  # byte-identical to the official tarball (zlib_amalgam.c excepted), so the
+  # cgo test legs inherit the official authority too. The matrix covers:
+  # 8 corpus entries × 11 levels × flush positions, the full header-parameter
+  # matrix (Name/Comment/Extra combinations × OS × MTIME × level × 4 content
+  # shapes), and empty input.
   native:
     name: three-way cross-check (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -56,17 +62,40 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: build native reference (vendored zlib 1.3.1 + system zlib)
+      - name: fetch official zlib 1.3.1 (pinned SHA-256)
+        run: |
+          for url in https://zlib.net/zlib-1.3.1.tar.gz \
+                     https://github.com/madler/zlib/releases/download/v1.3.1/zlib-1.3.1.tar.gz; do
+            if curl -fsSL --retry 3 -o zlib-official.tar.gz "$url"; then break; fi
+            echo "download failed from $url, trying next mirror"
+          done
+          echo "9a93b2b7dfdac77ceba5a558a580e74667dd6fede4585b91eefb60f03b72df23  zlib-official.tar.gz" | shasum -a 256 -c -
+          tar xzf zlib-official.tar.gz
+      - name: verify vendored zlib is byte-identical to the official release
+        run: |
+          status=0
+          for f in internal/czlib/zlib/*; do
+            base=$(basename "$f")
+            if [ "$base" = "zlib_amalgam.c" ]; then continue; fi
+            if ! cmp -s "$f" "zlib-1.3.1/$base"; then
+              echo "::error::vendored internal/czlib/zlib/$base differs from official zlib 1.3.1"
+              status=1
+            fi
+          done
+          exit $status
+      - name: build native reference (official tarball + vendored + system zlib)
         run: |
           mkdir -p bin
+          (cd zlib-1.3.1 && ./configure --static >/dev/null && make -s libz.a)
+          c++ -O2 -std=c++17 native/gzip_ref.cpp zlib-1.3.1/libz.a -Izlib-1.3.1 -o bin/gzip_ref_official
           cc  -O2 -c internal/czlib/zlib/zlib_amalgam.c -o bin/zlib_amalgam.o -Iinternal/czlib/zlib
           c++ -O2 -std=c++17 native/gzip_ref.cpp bin/zlib_amalgam.o -Iinternal/czlib/zlib -o bin/gzip_ref
           c++ -O2 -std=c++17 native/gzip_ref.cpp -lz -o bin/gzip_ref_system
-          ./bin/gzip_ref version && ./bin/gzip_ref_system version
+          ./bin/gzip_ref_official version && ./bin/gzip_ref version && ./bin/gzip_ref_system version
       - name: three-way byte cross-check
         env:
           CGO_ENABLED: "1"
-        run: go run ./cmd/crossnative -mode check -native ./bin/gzip_ref,./bin/gzip_ref_system
+        run: go run ./cmd/crossnative -mode check -native ./bin/gzip_ref_official,./bin/gzip_ref,./bin/gzip_ref_system
 
   # Memory safety net: run ASan+LSan over all C-layer entry points (precise
   # leak check); go test -asan checks for memory errors under real cgo workloads
