@@ -186,25 +186,25 @@ Level 6, each op is a full compression (reset + deflate + CRC + gzip framing); e
 
 | Input | C++ Native | CGO | Pure Go | Std Go | Pure Go / CGO | Pure Go / Std Go |
 |---|---|---|---|---|---|---|
-| 2 B | 1.9 µs/op | 2.2 µs/op | 2.3 µs/op | 11.7 µs/op | 0.95× | **4.99× faster** |
-| 198 B JSON token | 7.7 µs/op | 7.9 µs/op | 8.5 µs/op | 20.8 µs/op | 0.93× | **2.45× faster** |
-| 2 KB JSON | 11.4 µs/op | 12.4 µs/op | 9.8 µs/op | 20.7 µs/op | **1.27× faster** | **2.12× faster** |
-| 64 KB JSON | 302.4 µs (217 MB/s) | 284.1 µs (231 MB/s) | 250.5 µs (262 MB/s) | 178.0 µs (368 MB/s) | 1.13× | 0.71× |
-| 1 MB JSON | 11.3 ms (93 MB/s) | 10.1 ms (104 MB/s) | 10.8 ms (97 MB/s) | 7.0 ms (149 MB/s) | 0.93× | 0.65× |
-| 1 MB random (incompressible) | 23.8 ms (44 MB/s) | 23.8 ms (44 MB/s) | 28.6 ms (37 MB/s) | 18.2 ms (58 MB/s) | 0.83× | 0.64× |
+| 2 B | 2.0 µs/op | 2.3 µs/op | 2.3 µs/op | 11.4 µs/op | 1.01× | **4.99× faster** |
+| 198 B JSON token | 7.4 µs/op | 7.8 µs/op | 8.1 µs/op | 22.2 µs/op | 0.96× | **2.74× faster** |
+| 2 KB JSON | 11.4 µs/op | 11.1 µs/op | 8.9 µs/op | 20.8 µs/op | **1.25× faster** | **2.35× faster** |
+| 64 KB JSON | 302.4 µs (217 MB/s) | 285.1 µs (230 MB/s) | 167.8 µs (391 MB/s) | 180.3 µs (364 MB/s) | **1.70× faster** | 1.07× |
+| 1 MB JSON | 10.1 ms (104 MB/s) | 9.8 ms (107 MB/s) | 8.1 ms (129 MB/s) | 7.1 ms (148 MB/s) | **1.20× faster** | 0.87× |
+| 1 MB random (incompressible) | 23.9 ms (44 MB/s) | 24.3 ms (43 MB/s) | 20.6 ms (51 MB/s) | 18.6 ms (56 MB/s) | **1.18× faster** | 0.90× |
 
 **Memory** (Go heap per op; C-side buffers of the CGO column are invisible to Go heap stats; Std Go compresses into a reused bytes.Buffer while the other Go columns return a fresh exact-size slice per op):
 
 | Input | CGO | Pure Go | Std Go |
 |---|---|---|---|
-| 2 B | 32 B · 3 allocs | 49 B · 2 allocs | 0 B · 0 allocs |
-| 198 B JSON token | 404 B · 3 allocs | 233 B · 2 allocs | 0 B · 0 allocs |
-| 2 KB JSON | 180 B · 3 allocs | 120 B · 2 allocs | 0 B · 0 allocs |
-| 64 KB JSON | 580 B · 3 allocs | 355 B · 2 allocs | 0 B · 0 allocs |
-| 1 MB JSON | 272.0 KB · 3 allocs | 159.3 KB · 2 allocs | 0 B · 0 allocs |
-| 1 MB random (incompressible) | 2.0 MB · 4 allocs | 1.1 MB · 2 allocs | 0 B · 0 allocs |
+| 2 B | 32 B · 3 allocs | 24 B · 1 allocs | 0 B · 0 allocs |
+| 198 B JSON token | 404 B · 3 allocs | 210 B · 1 allocs | 0 B · 0 allocs |
+| 2 KB JSON | 180 B · 3 allocs | 97 B · 1 allocs | 0 B · 0 allocs |
+| 64 KB JSON | 580 B · 3 allocs | 316 B · 1 allocs | 0 B · 0 allocs |
+| 1 MB JSON | 272.0 KB · 3 allocs | 160.1 KB · 1 allocs | 0 B · 0 allocs |
+| 1 MB random (incompressible) | 2.0 MB · 4 allocs | 1.1 MB · 1 allocs | 0 B · 0 allocs |
 
-*2026-07-12 02:04 UTC · AMD EPYC 7763 64-Core Processor · go 1.26.5 · linux/amd64 · commit `973251c` (auto-updated by CI on push to main)*
+*2026-07-12 03:28 UTC · AMD EPYC 7763 64-Core Processor · go 1.26.5 · linux/amd64 · commit `6eccc98` (auto-updated by CI on push to main)*
 <!-- AUTOBENCH:END -->
 
 With the cgo-side compressor-stream pooling (see "Memory notes") CGO is
@@ -218,11 +218,11 @@ output bytes differ by design, which is the reason this library exists.
 <!-- AUTOLOC:BEGIN -->
 | Category | Files | Go lines |
 |---|---|---|
-| Product (root package + internal/zdeflate, pure Go) | 5 | 2215 |
-| Tests (*_test.go) | 8 | 1844 |
+| Product (root package + internal/zdeflate, pure Go) | 5 | 2266 |
+| Tests (*_test.go) | 8 | 2101 |
 | Test infrastructure (internal/czlib + cmd, non-test) | 5 | 1296 |
 
-*(tests + infrastructure) : product ≈ 1.4 : 1 (test-only vendored zlib C sources and the C++ native tool are not counted; auto-updated by CI on push to main)*
+*(tests + infrastructure) : product ≈ 1.5 : 1 (test-only vendored zlib C sources and the C++ native tool are not counted; auto-updated by CI on push to main)*
 <!-- AUTOLOC:END -->
 
 ## Memory notes
