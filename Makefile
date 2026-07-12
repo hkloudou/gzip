@@ -32,11 +32,11 @@ define fetch-zlib
 	if [ -n "$(1)" ]; then \
 		test -f "$(1)/deflate.c" || { echo "zlib $(2) override dir has no zlib sources"; exit 1; }; \
 	elif [ ! -f ".cache/zlib-$(2)/deflate.c" ]; then \
-		mkdir -p .cache; \
+		mkdir -p .cache && \
 		( curl -fsSL --retry 3 -o .cache/zlib-$(2).tar.gz https://zlib.net/zlib-$(2).tar.gz || \
 		  curl -fsSL --retry 3 -o .cache/zlib-$(2).tar.gz https://zlib.net/fossils/zlib-$(2).tar.gz || \
-		  curl -fsSL --retry 3 -o .cache/zlib-$(2).tar.gz https://github.com/madler/zlib/releases/download/v$(2)/zlib-$(2).tar.gz ); \
-		echo "$(3)  .cache/zlib-$(2).tar.gz" | shasum -a 256 -c -; \
+		  curl -fsSL --retry 3 -o .cache/zlib-$(2).tar.gz https://github.com/madler/zlib/releases/download/v$(2)/zlib-$(2).tar.gz ) && \
+		echo "$(3)  .cache/zlib-$(2).tar.gz" | shasum -a 256 -c - && \
 		tar -xzf .cache/zlib-$(2).tar.gz -C .cache; \
 	fi
 endef
