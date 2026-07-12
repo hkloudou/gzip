@@ -22,22 +22,25 @@ func Bound(n int) int {
 // the pool.
 const maxPooledBuf = 4 << 20 // 4MB
 
-var scratchPool = sync.Pool{}
+var scratchPool = sync.Pool{New: func() any { return new([]byte) }}
 
-func getScratch(n int) []byte {
-	if v := scratchPool.Get(); v != nil {
-		b := v.([]byte)
-		if cap(b) >= n {
-			return b[:n]
-		}
+// getScratch returns a pooled pointer to a slice of length n. The pool holds
+// *[]byte rather than []byte so a Put never boxes a fresh slice header into
+// an interface (which would cost one allocation per compression).
+func getScratch(n int) *[]byte {
+	p := scratchPool.Get().(*[]byte)
+	if cap(*p) < n {
+		*p = make([]byte, n)
 	}
-	return make([]byte, n)
+	*p = (*p)[:n]
+	return p
 }
 
-func putScratch(b []byte) {
-	if cap(b) <= maxPooledBuf {
-		scratchPool.Put(b[:0]) //nolint:staticcheck // slice header escape is acceptable
+func putScratch(p *[]byte) {
+	if cap(*p) > maxPooledBuf {
+		*p = nil // drop huge buffers; the header itself is still reused
 	}
+	scratchPool.Put(p)
 }
 
 // compressInto compresses input as raw deflate into out and returns the
@@ -77,7 +80,8 @@ func CompressLevel(input []byte, level int) []byte {
 	if level < 0 || level > 9 {
 		panic("zdeflate: invalid compression level")
 	}
-	scratch := getScratch(Bound(len(input)))
+	sp := getScratch(Bound(len(input)))
+	scratch := *sp
 	n, ok := compressInto(scratch, input, level)
 	if !ok {
 		// Theoretically unreachable: Bound is zlib's proven upper bound.
@@ -86,7 +90,7 @@ func CompressLevel(input []byte, level int) []byte {
 	}
 	res := make([]byte, n)
 	copy(res, scratch[:n])
-	putScratch(scratch)
+	putScratch(sp)
 	return res
 }
 
@@ -106,7 +110,8 @@ func GzipCompressLevel(input []byte, ts uint32, level int, osByte byte) []byte {
 		panic("zdeflate: invalid compression level")
 	}
 
-	scratch := getScratch(Bound(len(input)))
+	sp := getScratch(Bound(len(input)))
+	scratch := *sp
 	n, ok := compressInto(scratch, input, level)
 	if !ok {
 		panic("zdeflate: output bound exceeded")
@@ -127,7 +132,7 @@ func GzipCompressLevel(input []byte, ts uint32, level int, osByte byte) []byte {
 	out[9] = osByte
 
 	copy(out[10:], scratch[:n])
-	putScratch(scratch)
+	putScratch(sp)
 
 	// GZIP Trailer (8 bytes)
 	crc := crc32.ChecksumIEEE(input)
