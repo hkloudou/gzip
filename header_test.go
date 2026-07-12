@@ -3,7 +3,10 @@ package gzip
 import (
 	"bytes"
 	stdgzip "compress/gzip"
+	"fmt"
 	"io"
+	"math/rand"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -209,6 +212,133 @@ func TestHeaderMatchesCZlib(t *testing.T) {
 					}
 				}
 			}
+		}
+	}
+}
+
+// TestHeaderFuzzMatchesCZlib randomizes every header parameter at once —
+// Latin-1 names/comments (high bytes, length edges up to 1KB), Extra
+// (absent / empty-present / random up to the 65535 boundary), OS and MTIME
+// extremes, levels -1..9, mixed payloads — and requires the Writer's output
+// to be byte-identical to real C zlib's deflateSetHeader (XFL fixed up),
+// then round-trips the decoded fields through the standard library reader.
+// Fixed seed; ZLIB_FUZZ_ITER / ZLIB_FUZZ_SEED adjust intensity.
+func TestHeaderFuzzMatchesCZlib(t *testing.T) {
+	if !czlib.HasCGO() {
+		t.Skip("requires CGO_ENABLED=1 (real C zlib)")
+	}
+	iterations := 150
+	if testing.Short() {
+		iterations = 25
+	}
+	seed := int64(20260712)
+	if v := os.Getenv("ZLIB_FUZZ_ITER"); v != "" {
+		fmt.Sscanf(v, "%d", &iterations)
+	}
+	if v := os.Getenv("ZLIB_FUZZ_SEED"); v != "" {
+		fmt.Sscanf(v, "%d", &seed)
+	}
+	rng := rand.New(rand.NewSource(seed))
+
+	// any rune in [1,255] is valid Latin-1 for a header string (0 terminates)
+	latin1 := func(n int) string {
+		r := make([]rune, n)
+		for i := range r {
+			r[i] = rune(1 + rng.Intn(255))
+		}
+		return string(r)
+	}
+	strLens := []int{0, 0, 1, 2, 7, 40, 255, 1024}
+	extraLens := []int{-1, -1, 0, 1, 4, 100, 4096, 65535} // -1: nil (no FEXTRA)
+	mtimes := []uint32{0, 1, 0x7FFFFFFF, 0xFFFFFFFF}
+	oses := []byte{0, 3, 11, 255}
+
+	for i := 0; i < iterations; i++ {
+		name := latin1(strLens[rng.Intn(len(strLens))])
+		comment := latin1(strLens[rng.Intn(len(strLens))])
+		var extra []byte
+		if el := extraLens[rng.Intn(len(extraLens))]; el >= 0 {
+			extra = make([]byte, el)
+			rng.Read(extra) // Extra may contain any byte, including NUL
+		}
+		ts := mtimes[rng.Intn(len(mtimes))]
+		if rng.Intn(2) == 0 {
+			ts = rng.Uint32()
+		}
+		osByte := oses[rng.Intn(len(oses))]
+		if rng.Intn(2) == 0 {
+			osByte = byte(rng.Intn(256))
+		}
+		level := rng.Intn(11) - 1
+
+		// payload < 32KB so at level 0 the Writer's NO_FLUSH+FINISH call
+		// sequence produces the same stored-block split as the one-shot C
+		// path (see TestHeaderMatchesCZlib)
+		payload := make([]byte, rng.Intn(8192))
+		alpha := []int{2, 16, 256}[rng.Intn(3)]
+		for j := range payload {
+			payload[j] = byte(rng.Intn(alpha))
+		}
+
+		want, err := czlib.CompressWithGzHeader(payload, level, ts, osByte, extra, name, comment)
+		if err != nil {
+			t.Fatalf("fuzz#%d: C zlib: %v", i, err)
+		}
+
+		var buf bytes.Buffer
+		w, err := NewWriterLevel(&buf, level)
+		if err != nil {
+			t.Fatal(err)
+		}
+		w.Mtime = ts
+		w.OS = osByte
+		w.Name = name
+		w.Comment = comment
+		w.Extra = extra
+		if _, err := w.Write(payload); err != nil {
+			t.Fatalf("fuzz#%d: %v", i, err)
+		}
+		if err := w.Close(); err != nil {
+			t.Fatalf("fuzz#%d: %v", i, err)
+		}
+
+		got := append([]byte(nil), buf.Bytes()...)
+		if got[8] != 0 {
+			t.Fatalf("fuzz#%d: Writer XFL should always be 0, got %#x", i, got[8])
+		}
+		got[8] = cXFL(level)
+		if !bytes.Equal(got, want) {
+			off := firstDiff(got, want)
+			t.Fatalf("fuzz#%d: differs from C zlib (name=%dB comment=%dB extra=%dB(nil=%v) ts=%d os=%d level=%d payload=%dB; len %d vs %d, first diff @%d)",
+				i, latin1Len(name), latin1Len(comment), len(extra), extra == nil, ts, osByte, level, len(payload), len(got), len(want), off)
+		}
+
+		// independent check: the standard library must decode the same fields.
+		// stdlib's reader rejects NUL-terminated header strings longer than
+		// 511 bytes (its internal buffer); the gzip spec has no such limit —
+		// the 1024-byte length edge is covered by the C comparison above.
+		if latin1Len(name) > 511 || latin1Len(comment) > 511 {
+			continue
+		}
+		r, err := stdgzip.NewReader(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("fuzz#%d: stdlib reader: %v", i, err)
+		}
+		back, err := io.ReadAll(r)
+		if err != nil {
+			t.Fatalf("fuzz#%d: stdlib read: %v", i, err)
+		}
+		if !bytes.Equal(back, payload) {
+			t.Fatalf("fuzz#%d: payload round-trip mismatch", i)
+		}
+		if r.Header.Name != name || r.Header.Comment != comment {
+			t.Fatalf("fuzz#%d: name/comment did not survive the round-trip", i)
+		}
+		if len(r.Header.Extra) != len(extra) || (len(extra) > 0 && !bytes.Equal(r.Header.Extra, extra)) {
+			t.Fatalf("fuzz#%d: extra did not survive the round-trip (%dB vs %dB)", i, len(r.Header.Extra), len(extra))
+		}
+		if err := r.Close(); err != nil {
+			t.Fatalf("fuzz#%d: %v", i, err)
 		}
 	}
 }
