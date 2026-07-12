@@ -3,16 +3,16 @@
 //
 // The goal is compressed output that is **byte-for-byte identical** to C zlib
 // under the same parameters (windowBits=15 / memLevel=8 / Z_DEFAULT_STRATEGY,
-// level 0-9). Therefore all algorithmic details — the hash function, lazy
+// level 0-9). Therefore every algorithmic decision — the hash function, lazy
 // matching, chain truncation, tie-breaks when building the Huffman trees, bit
-// buffer flush order, block type (stored/static/dynamic) decisions — are
-// ported line by line from the zlib source, with no "optimization" changes.
+// emission order, block type (stored/static/dynamic) decisions — is ported
+// exactly from the zlib source. A few hot spots deviate mechanically for
+// speed (wide loads in longestMatch, SWAR in slideHash, a 64-bit bit
+// accumulator here in trees.go); each carries a comment proving the deviation
+// cannot change any output byte, and all are covered by the byte-for-byte
+// cross-check matrices.
 //
 // This file corresponds to zlib's trees.c.
-//
-// The one deliberate mechanical deviation: C's 16-bit bi_buf is widened to a
-// 64-bit accumulator in sendBits/biFlush/biWindup. The emitted bit stream —
-// and therefore every output byte — is identical; see sendBits.
 package zdeflate
 
 import "encoding/binary"

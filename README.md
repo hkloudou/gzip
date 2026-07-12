@@ -23,7 +23,7 @@ of the product build — tests/CI only):
 | Reference | Location | Purpose |
 |---|---|---|
 | Embedded official zlib 1.3.1 C sources | `internal/czlib` (cgo, test-only) | Byte-for-byte cross-check against real C zlib when tests run with `CGO_ENABLED=1` |
-| C++ native tool | `native/gzip_ref.cpp` (separate process, no cgo) | Third-party referee for the CI three-way cross-check (vendored 1.3.1 + system zlib variants) |
+| C++ native tool | `native/gzip_ref.cpp` (separate process, no cgo) | Third-party referee for the CI three-way cross-check, built from the official zlib 1.3.1 tarball (pinned SHA-256) plus vendored and system-zlib variants |
 | Randomized fuzz + streaming matrices | `internal/czlib` tests | Levels 0-9 × large corpora × random fuzz cross-checks (`make test` / `make fuzz`) |
 
 ## Usage
@@ -165,7 +165,7 @@ consistency backstop (click the badge above for live results):
 | CI job | Coverage |
 |---|---|
 | test (ubuntu/macos × CGO 0/1 + windows) | Full unit tests (the product is pure Go; CGO only decides whether the real-C-zlib comparison leg runs) + C↔Go cross-checks: levels 0-9 × flush types (NO_FLUSH/PARTIAL/SYNC/FULL/FINISH) full matrix, golden vectors, streaming call sequences, Writer behavior, **all header parameters × real C zlib `deflateSetHeader`**, cgo memory-bounded test |
-| native (ubuntu/macos) | **Three-way byte-for-byte cross-check**: C++ native (real zlib without cgo; vendored 1.3.1 and system zlib variants) vs Go+cgo vs pure Go. Matrix: 8 corpora × 11 levels × flush positions + MTIME × OS dimensions + all header parameters + empty input |
+| native (ubuntu/macos) | **Three-way byte-for-byte cross-check**: C++ native (real zlib without cgo) vs Go+cgo vs pure Go. The native referee is built from the **official zlib 1.3.1 tarball** (pinned SHA-256; the deterministic reference, independent of this repository) plus vendored and system-zlib variants, and the vendored `internal/czlib/zlib` sources are verified byte-identical to the official tarball. Matrix: 8 corpora × 11 levels × flush positions + MTIME × OS dimensions + all header parameters + empty input |
 | race | Full test suite under the Go race detector, including dedicated `sync.Pool` adversarial tests (concurrent cross-contamination, scratch aliasing, Writer reuse) |
 | sanitize | ASan + LeakSanitizer over every C entry point; `go test -asan` for memory errors under real cgo workloads |
 | fuzz | 500 random inputs × random levels, C zlib vs pure Go byte comparison |
