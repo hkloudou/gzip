@@ -11,11 +11,15 @@ speculative abstractions, no unnecessary API surface.
 1. **No zlib C code lives in this repository, ever.** The C reference is
    the `gzip_ref` referee binary, built from the **official zlib 1.3.1
    tarball** (downloaded with a pinned SHA-256 by `make zlib-src`, or an
-   offline source tree via `ZLIB131_DIR`) and driven as a subprocess.
-   `native/gzip_ref.cpp` is a thin driver with no compression logic — do
-   not vendor, patch, or re-implement zlib in C here; the "correct answer"
-   must always come from the unmodified official release. Upgrading means
-   changing the pinned version+hash in the Makefile, nothing else.
+   offline source tree via `ZLIB131_DIR`) and driven as a subprocess. A
+   second referee (`gzip_ref_132`, `make native-build-132` /
+   `ZLIB132_DIR`) is built the same way from the **official zlib 1.3.2
+   tarball** and joins the cross-check matrix and the benchmark; the
+   byte-correctness pin stays 1.3.1. `native/gzip_ref.cpp` is a thin
+   driver with no compression logic — do not vendor, patch, or
+   re-implement zlib in C here; the "correct answer" must always come from
+   the unmodified official releases. Upgrading means changing the pinned
+   version+hash in the Makefile, nothing else.
 
 2. **The pure Go port must match C's logic exactly.** `internal/zdeflate`
    is a line-by-line counterpart of `deflate.c`/`trees.c`: read the
@@ -34,14 +38,14 @@ speculative abstractions, no unnecessary API surface.
 
 3. **The cross-check matrices, fuzz, and benchmarks are the skeleton of
    this repository and must never be reduced:**
-   - `cmd/crossnative -mode check`: official-build referee + system-zlib
-     referee vs this library, byte-for-byte across levels × flush
-     positions × streaming call sequences × MTIME × OS × all header
-     parameters × multiple corpora;
+   - `cmd/crossnative -mode check`: official-build referees (1.3.1 +
+     1.3.2) + system-zlib referee vs this library, byte-for-byte across
+     levels × flush positions × streaming call sequences × MTIME × OS ×
+     all header parameters × multiple corpora;
    - the `*_ref_test.go` crosscheck / stream / header / fuzz matrices and
      the streaming-output + HTTP tests in the root package;
-   - bench: throughput + memory (C++ native / pure Go / std Go),
-     auto-written back to the README by CI (AUTOBENCH block);
+   - bench: throughput + memory (C++ zlib 1.3.1 + 1.3.2 / pure Go /
+     std Go), auto-written back to the README by CI (AUTOBENCH block);
    - loc: the line-count bot (AUTOLOC block).
    When adding compression behavior (new parameters, new flush semantics,
    new header fields), extend these matrices in the same change.
@@ -74,15 +78,17 @@ regression there. Full cross-check coverage is defined by `make test`
 
 ```bash
 make test        # referee build + full test suite
-make native      # cross-check matrix (official + system referee vs pure Go)
+make native      # cross-check matrix (official 1.3.1 + 1.3.2 + system referees vs pure Go)
 make fuzz        # heavy randomized cross-check
 make bench-table # benchmark table
-make asan-check  # ASan/LSan sweep over every referee mode
+make asan-check  # ASan/LSan sweep over every referee mode (both official builds)
 ```
 
-The referee build downloads the official tarball into `.cache/`
-(SHA-256-pinned). Offline, point `ZLIB131_DIR` at any zlib 1.3.1 source
-tree (it needs at least adler32/crc32/deflate/trees/zutil + headers).
+The referee builds download the official tarballs into `.cache/`
+(SHA-256-pinned, with a zlib.net/fossils fallback for releases zlib.net
+has rotated out). Offline, point `ZLIB131_DIR`/`ZLIB132_DIR` at matching
+zlib source trees (each needs at least
+adler32/crc32/deflate/trees/zutil + headers).
 
 ## Contribution flow
 
