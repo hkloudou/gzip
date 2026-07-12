@@ -186,20 +186,21 @@ Every push runs
 <!-- AUTOBENCH:BEGIN -->
 Level 6, each op is a full compression (reset + deflate + CRC + gzip framing); every column reuses compressor state (C++ via deflateReset, the Go columns via sync.Pool / Writer.Reset).
 
-- **C++ Native**: real zlib 1.3.1 (built from the official 1.3.1 sources) looping in-process — the C performance ceiling and the byte-correctness referee
+- **C++ zlib 1.3.1**: real zlib built from the official 1.3.1 sources, looping in-process — the C performance ceiling and the byte-correctness referee
+- **C++ zlib 1.3.2**: real zlib built from the official 1.3.2 sources, looping in-process — the newest official zlib release (byte-identical output, enforced by the cross-check matrix)
 - **Pure Go**: this library
 - **Std Go**: the standard library compress/gzip — speed context only; its output bytes differ by design, which is the reason this library exists
 
 **Speed** (ratios are relative speed of Pure Go; higher = Pure Go faster):
 
-| Input | C++ Native | Pure Go | Std Go | Pure Go / C++ Native | Pure Go / Std Go |
-|---|---|---|---|---|---|
-| 2 B | 1.8 µs/op | 2.4 µs/op | 10.4 µs/op | 0.72× | **4.27× faster** |
-| 198 B JSON token | 7.4 µs/op | 8.5 µs/op | 20.8 µs/op | 0.87× | **2.44× faster** |
-| 2 KB JSON | 14.8 µs/op | 8.7 µs/op | 19.9 µs/op | **1.71× faster** | **2.30× faster** |
-| 64 KB JSON | 309.5 µs (212 MB/s) | 164.6 µs (398 MB/s) | 181.0 µs (362 MB/s) | **1.88× faster** | 1.10× |
-| 1 MB JSON | 10.1 ms (104 MB/s) | 8.2 ms (127 MB/s) | 7.2 ms (146 MB/s) | **1.23× faster** | 0.87× |
-| 1 MB random (incompressible) | 23.9 ms (44 MB/s) | 20.7 ms (51 MB/s) | 18.1 ms (58 MB/s) | **1.15× faster** | 0.87× |
+| Input | C++ zlib 1.3.1 | C++ zlib 1.3.2 | Pure Go | Std Go | Pure Go / C++ zlib 1.3.1 | Pure Go / C++ zlib 1.3.2 | Pure Go / Std Go |
+|---|---|---|---|---|---|---|---|
+| 2 B | 1.7 µs/op | 1.8 µs/op | 2.5 µs/op | 11.4 µs/op | 0.71× | 0.75× | **4.66× faster** |
+| 198 B JSON token | 7.4 µs/op | 7.4 µs/op | 8.4 µs/op | 20.9 µs/op | 0.89× | 0.89× | **2.50× faster** |
+| 2 KB JSON | 11.3 µs/op | 11.4 µs/op | 8.9 µs/op | 19.9 µs/op | **1.27× faster** | **1.28× faster** | **2.24× faster** |
+| 64 KB JSON | 422.0 µs (155 MB/s) | 310.8 µs (211 MB/s) | 163.9 µs (400 MB/s) | 181.5 µs (361 MB/s) | **2.57× faster** | **1.90× faster** | 1.11× |
+| 1 MB JSON | 10.6 ms (99 MB/s) | 10.3 ms (102 MB/s) | 8.2 ms (128 MB/s) | 7.1 ms (147 MB/s) | **1.29× faster** | **1.25× faster** | 0.87× |
+| 1 MB random (incompressible) | 24.1 ms (44 MB/s) | 24.1 ms (43 MB/s) | 20.7 ms (51 MB/s) | 18.0 ms (58 MB/s) | **1.16× faster** | **1.17× faster** | 0.87× |
 
 **Memory** (Go heap per op; the native referee is a subprocess and has no Go heap; Std Go compresses into a reused bytes.Buffer while Pure Go returns a fresh exact-size slice per op):
 
@@ -208,11 +209,11 @@ Level 6, each op is a full compression (reset + deflate + CRC + gzip framing); e
 | 2 B | 24 B · 1 allocs | 0 B · 0 allocs |
 | 198 B JSON token | 210 B · 1 allocs | 0 B · 0 allocs |
 | 2 KB JSON | 99 B · 1 allocs | 0 B · 0 allocs |
-| 64 KB JSON | 288 B · 1 allocs | 0 B · 0 allocs |
-| 1 MB JSON | 155.8 KB · 1 allocs | 0 B · 0 allocs |
-| 1 MB random (incompressible) | 1.1 MB · 1 allocs | 0 B · 0 allocs |
+| 64 KB JSON | 315 B · 1 allocs | 0 B · 0 allocs |
+| 1 MB JSON | 155.7 KB · 1 allocs | 0 B · 0 allocs |
+| 1 MB random (incompressible) | 1.0 MB · 1 allocs | 0 B · 0 allocs |
 
-*2026-07-12 06:22 UTC · AMD EPYC 7763 64-Core Processor · go 1.26.5 · linux/amd64 · commit `af3848f` (auto-updated by CI on push to main)*
+*2026-07-12 17:24 UTC · AMD EPYC 7763 64-Core Processor · go 1.26.5 · linux/amd64 · commit `141c3dc` (auto-updated by CI on push to main)*
 <!-- AUTOBENCH:END -->
 
 The standard-library column is performance-only context — its output bytes
@@ -225,9 +226,9 @@ differ by design, which is the reason this library exists.
 |---|---|---|
 | Product (root package + internal/zdeflate, pure Go) | 5 | 2267 |
 | Tests (*_test.go) | 8 | 2215 |
-| Test infrastructure (cmd/crossnative, non-test) | 1 | 814 |
+| Test infrastructure (cmd/crossnative, non-test) | 1 | 851 |
 
-*(tests + infrastructure) : product ≈ 1.3 : 1 (the C++ referee tool is not Go code and is not counted; auto-updated by CI on push to main)*
+*(tests + infrastructure) : product ≈ 1.4 : 1 (the C++ referee tool is not Go code and is not counted; auto-updated by CI on push to main)*
 <!-- AUTOLOC:END -->
 
 ## Memory notes
