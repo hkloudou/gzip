@@ -16,15 +16,18 @@ This library produces GZIP output **byte-identical to zlib**. The product is
 **100% pure Go** (a line-by-line port of zlib's deflate, `internal/zdeflate`):
 no cgo, no external dependencies, cross-compiles anywhere (including
 js/wasm), and emits exactly the same bytes on every platform and build mode.
+In fact the repository contains **no zlib C code at all** — the reference
+implementation used by tests is real zlib built from the **official 1.3.1
+tarball** (pinned SHA-256), driven as a separate process.
 
 Consistency is enforced by three layers of test infrastructure (never part
 of the product build — tests/CI only):
 
 | Reference | Location | Purpose |
 |---|---|---|
-| Embedded official zlib 1.3.1 C sources | `internal/czlib` (cgo, test-only) | Byte-for-byte cross-check against real C zlib when tests run with `CGO_ENABLED=1` |
-| C++ native tool | `native/gzip_ref.cpp` (separate process, no cgo) | Third-party referee for the CI three-way cross-check, built from the official zlib 1.3.1 tarball (pinned SHA-256) plus vendored and system-zlib variants |
-| Randomized fuzz + streaming matrices | `internal/czlib` tests | Levels 0-9 × large corpora × random fuzz cross-checks (`make test` / `make fuzz`) |
+| `gzip_ref` referee | `native/gzip_ref.cpp` (subprocess; a thin driver with no compression logic) | Real zlib as the deterministic correct answer: built from the official zlib 1.3.1 tarball, plus a system-zlib variant |
+| Cross-check / fuzz / streaming matrices | root package `*_ref_test.go` | Levels 0-9 × large corpora × flush sequences × all header parameters × random fuzz, byte-compared against the referee (`make test` / `make fuzz`) |
+| crossnative orchestrator | `cmd/crossnative` | The CI cross-check matrix, the benchmark table and the line-count bot |
 
 ## Usage
 
@@ -141,8 +144,8 @@ func compress(data []byte, ts uint32, level int) ([]byte, error) {
 
 | Platform | Byte-identical to standard zlib? | Notes |
 |---|---|---|
-| iOS/macOS system libz (`deflate()`) | ✅ identical | **Verified in CI** (macOS 15.7 arm64, system libz 1.2.12, called via dlopen): all levels 0-9 byte-identical to this library. Apple's changes are limited to inflate/checksum acceleration; the gzip header OS byte is 19 on Apple platforms, which this library sidesteps by writing OS=3 itself |
-| Apple Compression framework (`COMPRESSION_ZLIB`) | ⚠️ measured = zlib level 9, not guaranteed | Apple only promises raw DEFLATE and describes it as a "level 5 equivalent"; **CI measurements** (macOS 15.7 arm64) show its output is actually byte-identical to standard zlib **level 9** (not 5). This is an unpromised implementation detail that may change with OS versions — CI re-measures every run and reports the matching level in logs |
+| iOS/macOS system libz (`deflate()`) | ✅ identical | **Verified in CI every run**: the macOS native job links the referee against the system libz (`gzip_ref_system`) and cross-checks all levels/matrices byte-for-byte against this library. Apple's changes are limited to inflate/checksum acceleration; the gzip header OS byte is 19 on Apple platforms, which this library sidesteps by writing OS=3 itself |
+| Apple Compression framework (`COMPRESSION_ZLIB`) | ⚠️ measured = zlib level 9, not guaranteed | Apple only promises raw DEFLATE and describes it as a "level 5 equivalent"; measurements (macOS 15.7 arm64, v1.1.x CI probe) showed its output byte-identical to standard zlib **level 9** (not 5). This is an unpromised implementation detail that may change with OS versions |
 | Java `java.util.zip.Deflater` (OpenJDK) | ✅ identical | Bundles/links official zlib (except distros like Fedora 40+ that switched to zlib-ng) |
 | Android 13+ | ✅ identical | Chromium fork with the zlib-compatible hash enabled (fixed for OTA incremental updates) |
 | Android 11–12L | ❌ different | The Chromium fork's CRC32C hash produces valid but non-canonical output |
@@ -152,24 +155,27 @@ func compress(data []byte, ts uint32, level int) ([]byte, error) {
 ## Testing and performance
 
 ```bash
-make test        # full test suite in both build modes
-make native      # three-way byte-for-byte cross-check
-make fuzz        # heavy randomized cross-check (C zlib vs pure Go)
-make bench-table # benchmark table (C++ native / CGO / pure Go / std Go)
-make leak-check  # C-layer ASan/LSan leak check
+make test        # referee build + full test suite (C legs skip if no C toolchain)
+make native      # byte-for-byte cross-check matrix (official + system zlib referees)
+make fuzz        # heavy randomized cross-check (real zlib vs pure Go)
+make bench-table # benchmark table (C++ native / pure Go / std Go)
+make asan-check  # ASan/LSan sweep over every referee mode
 ```
 
-Every push runs [GitHub Actions](.github/workflows/ci.yml) as the final
-consistency backstop (click the badge above for live results):
+The referee is built from the official `zlib-1.3.1.tar.gz` (downloaded and
+SHA-256-verified into `.cache/`, or point `ZLIB131_DIR` at an existing zlib
+source tree for offline work). Every push runs
+[GitHub Actions](.github/workflows/ci.yml) as the final consistency backstop
+(click the badge above for live results):
 
 | CI job | Coverage |
 |---|---|
-| test (ubuntu/macos × CGO 0/1 + windows) | Full unit tests (the product is pure Go; CGO only decides whether the real-C-zlib comparison leg runs) + C↔Go cross-checks: levels 0-9 × flush types (NO_FLUSH/PARTIAL/SYNC/FULL/FINISH) full matrix, golden vectors, streaming call sequences, Writer behavior, **all header parameters × real C zlib `deflateSetHeader`**, cgo memory-bounded test |
-| native (ubuntu/macos) | **Three-way byte-for-byte cross-check**: C++ native (real zlib without cgo) vs Go+cgo vs pure Go. The native referee is built from the **official zlib 1.3.1 tarball** (pinned SHA-256; the deterministic reference, independent of this repository) plus vendored and system-zlib variants, and the vendored `internal/czlib/zlib` sources are verified byte-identical to the official tarball. Matrix: 8 corpora × 11 levels × flush positions + MTIME × OS dimensions + all header parameters + empty input |
-| race | Full test suite under the Go race detector, including dedicated `sync.Pool` adversarial tests (concurrent cross-contamination, scratch aliasing, Writer reuse) |
-| sanitize | ASan + LeakSanitizer over every C entry point; `go test -asan` for memory errors under real cgo workloads |
-| fuzz | 500 random inputs × random levels, C zlib vs pure Go byte comparison |
-| bench | Four-way benchmark (C++ native / CGO / pure Go / std Go, with memory stats); auto-updates the table below on push to main |
+| test (ubuntu/macos/windows) | Full unit tests + real-zlib cross-checks: levels 0-9 × flush types (NO_FLUSH/PARTIAL/SYNC/FULL/FINISH) full matrix, golden vectors, streaming call sequences, Writer behavior, **all header parameters × real zlib `deflateSetHeader`** (deterministic + seeded random fuzz), streaming-output/HTTP tests, `sync.Pool` stress. On windows the referee legs skip (pure Go coverage only) |
+| native (ubuntu/macos) | **Cross-check matrix**: real zlib vs pure Go, byte-for-byte. The referee is built from the **official zlib 1.3.1 tarball** (pinned SHA-256; independent of this repository) and, as a second environment, against the system zlib — on macOS that is Apple's libz, so Apple-platform compatibility is re-verified every run. Matrix: 8 corpora × 11 levels × flush positions + streaming call sequences + MTIME × OS dimensions + all header parameters + empty input |
+| race | Full test suite (referee included) under the Go race detector, with dedicated `sync.Pool` adversarial tests (concurrent cross-contamination, scratch aliasing, chunk-boundary stress, Writer reuse) |
+| sanitize | ASan + LeakSanitizer over every referee mode (compress/stream/header/bench × parameter edge cases) |
+| fuzz | 500 random inputs × random levels, real zlib vs pure Go byte comparison |
+| bench | Three-way benchmark (C++ native / pure Go / std Go, with memory stats); auto-updates the table below on push to main |
 | cross-build | Pure-Go cross-compilation for linux/arm64, windows, darwin/arm64, js/wasm |
 
 ### Benchmark (auto-updated by CI)
@@ -207,11 +213,8 @@ Level 6, each op is a full compression (reset + deflate + CRC + gzip framing); e
 *2026-07-12 03:28 UTC · AMD EPYC 7763 64-Core Processor · go 1.26.5 · linux/amd64 · commit `6eccc98` (auto-updated by CI on push to main)*
 <!-- AUTOBENCH:END -->
 
-With the cgo-side compressor-stream pooling (see "Memory notes") CGO is
-roughly on par with C++ native; the pure Go port runs at about 80-95% of C.
-Its value is zero cgo: cross-compile anywhere, js/wasm support, no C
-toolchain. The standard-library column is performance-only context — its
-output bytes differ by design, which is the reason this library exists.
+The standard-library column is performance-only context — its output bytes
+differ by design, which is the reason this library exists.
 
 ### Code size (auto-counted by CI)
 
@@ -228,18 +231,15 @@ output bytes differ by design, which is the reason this library exists.
 ## Memory notes
 
 - Compressor state (window/hash tables/symbol buffers, ~320KB measured) is
-  reused via `sync.Pool` — zero steady-state allocations. Pool correctness
-  gets dedicated adversarial tests (concurrent cross-contamination, scratch
-  aliasing, Writer reuse) run under the race detector in CI;
+  reused via `sync.Pool` — one-shot compression allocates exactly once (the
+  result slice). Pool correctness gets dedicated adversarial tests
+  (concurrent cross-contamination, scratch aliasing, chunk-boundary stress,
+  Writer reuse) run under the race detector in CI;
 - `gzip.Writer` is truly streaming: `Write` compresses incrementally and
   pushes downstream without buffering the whole input (O(1) memory for
-  large files); internal output scratch is pooled too;
-- The test reference implementation (`internal/czlib`, never in the product
-  build) pools C-side compressor streams as well, reclaimed by GC
-  finalizers as a backstop; inputs beyond 4GiB-1 (32-bit `avail_in`) fail
-  loudly instead of truncating silently;
-- Memory safety has three layers of coverage: precise ASan/LeakSanitizer
-  checks over every C entry point (CI sanitize job), `go test -asan` under
-  real workloads, and an RSS-bounded test;
-- The legacy WASM runtime (wazero, resident with a global mutex) is long
-  gone.
+  large files); internal output scratch is pooled too. `Flush` makes
+  everything written so far immediately decodable (Z_SYNC_FLUSH), which is
+  what HTTP/SSE streaming needs — covered by dedicated streaming-output and
+  httptest end-to-end tests;
+- The C surface executed by tests (the gzip_ref referee) runs under precise
+  ASan/LeakSanitizer sweeps in CI across every mode and parameter edge case.

@@ -1,22 +1,31 @@
-// gzip_ref — standalone C++ native reference implementation (no cgo).
+// gzip_ref — standalone C++ native reference tool (this repository's only
+// C++ source; it contains no compression logic of its own).
 //
-// Produces GZIP byte streams with real zlib (vendored 1.3.1 or system -lz),
-// acting as the "third-party referee" in CI's three-way cross-check: the
-// outputs of C++ native / Go+cgo / pure Go must match byte-for-byte.
+// Produces GZIP/deflate byte streams with real zlib — built either against
+// the official zlib 1.3.1 tarball (pinned SHA-256; the deterministic
+// reference) or the system zlib — acting as the referee for the cross-check:
+// its output and the pure Go library's output must match byte-for-byte.
 //
-// Build (vendored zlib, exactly the same sources the cgo mode uses):
-//   cc  -O2 -c internal/czlib/zlib/zlib_amalgam.c -o /tmp/zlib_amalgam.o -Iinternal/czlib/zlib
-//   c++ -O2 -std=c++17 native/gzip_ref.cpp /tmp/zlib_amalgam.o -Iinternal/czlib/zlib -o gzip_ref
+// Build (official tarball; `make native-build` automates download + build):
+//   (cd zlib-1.3.1 && ./configure --static && make libz.a)
+//   c++ -O2 -std=c++17 native/gzip_ref.cpp zlib-1.3.1/libz.a -Izlib-1.3.1 -o gzip_ref
 //
 // Build (system zlib):
 //   c++ -O2 -std=c++17 native/gzip_ref.cpp -lz -o gzip_ref_system
 //
-// Usage (input on stdin, GZIP bytes on stdout):
+// Usage (input on stdin, compressed bytes on stdout):
 //   gzip_ref compress <level> <mtime> <os> [flushAt]
 //       raw deflate (windowBits=-15, memLevel=8) plus a hand-written 10-byte
 //       header (XFL=0) and 8-byte trailer — byte-identical to this library's
 //       gzip.Writer framing; optional flushAt: Z_SYNC_FLUSH after the first
 //       flushAt bytes, then finish.
+//   gzip_ref stream <level> <flush>@<len> [<flush>@<len> ...]
+//       raw deflate (windowBits=-15) driven by an explicit call sequence:
+//       for each op, the next <len> input bytes are passed to
+//       deflate(strm, <flush>) with ample output space — the exact call
+//       semantics of this library's streaming Deflater. <flush> uses zlib
+//       values (0=NO_FLUSH 1=PARTIAL 2=SYNC 3=FULL 4=FINISH). The sequence
+//       must consume the whole input; end with 4@<len> for a complete stream.
 //   gzip_ref header <level> <mtime> <os> <nameHex> <commentHex> <extraHex>
 //       full GZIP stream produced by zlib itself (windowBits=15+16 +
 //       deflateSetHeader). The three fields are passed as hex; "-" means
@@ -242,6 +251,65 @@ int cmd_compress(int argc, char** argv) {
     return 0;
 }
 
+// stream mode: drive raw deflate with an explicit (flush, length) call
+// sequence — the C-side twin of the Go Deflater's Deflate(p, flush) calls
+// (full input slice as avail_in, always-sufficient avail_out).
+int cmd_stream(int argc, char** argv) {
+    if (argc < 4) die("usage: stream <level> <flush>@<len> [<flush>@<len> ...]");
+    int level = parse_int(argv[2]);
+    std::vector<uint8_t> in = read_all_stdin();
+
+    z_stream s;
+    memset(&s, 0, sizeof(s));
+    if (deflateInit2(&s, level, Z_DEFLATED, -15, 8, Z_DEFAULT_STRATEGY) != Z_OK) {
+        die("deflateInit2 failed");
+    }
+
+    // deflateBound covers the data; each flush op adds at most a few bytes
+    // of empty-block/sync overhead
+    size_t max = deflateBound(&s, in.size()) + 64 * static_cast<size_t>(argc);
+    std::vector<uint8_t> out(max);
+    s.next_out = out.data();
+    s.avail_out = static_cast<uInt>(max);
+
+    size_t pos = 0;
+    for (int i = 3; i < argc; i++) {
+        const char* at = strchr(argv[i], '@');
+        if (!at) die("stream op must be <flush>@<len>");
+        std::string fs(argv[i], static_cast<size_t>(at - argv[i]));
+        int flush = parse_int(fs.c_str());
+        long len = parse_int(at + 1);
+        if (flush < Z_NO_FLUSH || flush > Z_FINISH) die("flush must be 0..4");
+        if (len < 0 || pos + static_cast<size_t>(len) > in.size()) {
+            die("stream op length exceeds input");
+        }
+        s.next_in = const_cast<Bytef*>(in.data() + pos);
+        s.avail_in = static_cast<uInt>(len);
+        pos += static_cast<size_t>(len);
+
+        if (flush == Z_FINISH) {
+            int r;
+            do {
+                r = deflate(&s, Z_FINISH);
+            } while (r == Z_OK); // level 0 may need more than one call
+            if (r != Z_STREAM_END) die("deflate(Z_FINISH) failed");
+        } else {
+            // With sufficient avail_out one call consumes all input;
+            // Z_BUF_ERROR just means "nothing to do" (e.g. repeated flush
+            // with no new input) and is not fatal, as in C usage
+            int r = deflate(&s, flush);
+            if (r != Z_OK && r != Z_BUF_ERROR) die("deflate failed");
+            if (s.avail_in != 0) die("deflate did not consume the op's input");
+        }
+    }
+    if (pos != in.size()) die("stream ops did not consume the whole input");
+
+    size_t out_len = max - s.avail_out;
+    deflateEnd(&s);
+    write_all_stdout(out.data(), out_len);
+    return 0;
+}
+
 int cmd_header(int argc, char** argv) {
     if (argc != 8) die("usage: header <level> <mtime> <os> <nameHex> <commentHex> <extraHex>");
     int level = parse_int(argv[2]);
@@ -340,12 +408,13 @@ int cmd_bench(int argc, char** argv) {
 } // namespace
 
 int main(int argc, char** argv) {
-    if (argc < 2) die("usage: gzip_ref <compress|header|bench|version> ...");
+    if (argc < 2) die("usage: gzip_ref <compress|stream|header|bench|version> ...");
     if (strcmp(argv[1], "version") == 0) {
         printf("%s\n", zlibVersion());
         return 0;
     }
     if (strcmp(argv[1], "compress") == 0) return cmd_compress(argc, argv);
+    if (strcmp(argv[1], "stream") == 0) return cmd_stream(argc, argv);
     if (strcmp(argv[1], "header") == 0) return cmd_header(argc, argv);
     if (strcmp(argv[1], "bench") == 0) return cmd_bench(argc, argv);
     die("unknown subcommand");

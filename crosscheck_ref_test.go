@@ -1,7 +1,9 @@
-//go:build cgo
-// +build cgo
+package gzip
 
-package czlib
+// Byte-for-byte cross-checks of the pure Go port against real zlib 1.3.1
+// (the gzip_ref referee built from the official sources). Ported from the
+// former cgo-based internal/czlib tests — the reference implementation now
+// runs out of process, so this repository needs no C code and no cgo.
 
 import (
 	"bytes"
@@ -88,16 +90,13 @@ func crossCheckCorpus() map[string][]byte {
 }
 
 // TestCrossCheckRawAllLevels cross-checks raw deflate output byte-by-byte
-// between C zlib and the pure Go implementation over the whole corpus at all
-// levels 0-9.
+// between real zlib and the pure Go implementation over the whole corpus at
+// all levels 0-9.
 func TestCrossCheckRawAllLevels(t *testing.T) {
-	corpus := crossCheckCorpus()
-	for name, data := range corpus {
+	bin := needRef(t)
+	for name, data := range crossCheckCorpus() {
 		for level := 0; level <= 9; level++ {
-			cOut, err := cgoDeflateRaw(data, level)
-			if err != nil {
-				t.Fatalf("%s level=%d: C deflate failed: %v", name, level, err)
-			}
+			cOut := refDeflateRaw(t, bin, data, level)
 			goOut := zdeflate.CompressLevel(data, level)
 			if !bytes.Equal(cOut, goOut) {
 				idx := firstDiff(cOut, goOut)
@@ -108,20 +107,18 @@ func TestCrossCheckRawAllLevels(t *testing.T) {
 	}
 }
 
-// TestCrossCheckGzip cross-checks the complete GZIP output (header and trailer included).
+// TestCrossCheckGzip cross-checks the complete GZIP output (header and
+// trailer included) across MTIME extremes.
 func TestCrossCheckGzip(t *testing.T) {
-	corpus := crossCheckCorpus()
-	timestamps := []int64{0, 1751038273, 4294967295}
-	for name, data := range corpus {
+	bin := needRef(t)
+	timestamps := []uint32{0, 1751038273, 4294967295}
+	for name, data := range crossCheckCorpus() {
 		if len(data) == 0 {
 			continue
 		}
 		for _, ts := range timestamps {
-			cOut, err := CompressOpts(data, uint32(ts), -1, 3)
-			if err != nil {
-				t.Fatalf("%s ts=%d: C compression failed: %v", name, ts, err)
-			}
-			goOut := zdeflate.GzipCompressLevel(data, uint32(ts), -1, 3)
+			cOut := refGzip(t, bin, data, -1, ts, 3, -1)
+			goOut := zdeflate.GzipCompressLevel(data, ts, -1, 3)
 			if !bytes.Equal(cOut, goOut) {
 				idx := firstDiff(cOut, goOut)
 				t.Errorf("%s ts=%d: GZIP output mismatch (C=%d bytes, Go=%d bytes, first diff@%d)",
@@ -131,30 +128,29 @@ func TestCrossCheckGzip(t *testing.T) {
 	}
 }
 
-// TestCrossCheckCompressLevel cross-checks the level-aware GZIP API, CGO vs pure Go.
+// TestCrossCheckCompressLevel cross-checks the level-aware GZIP one-shot,
+// real zlib vs pure Go, levels -1..9.
 func TestCrossCheckCompressLevel(t *testing.T) {
-	corpus := crossCheckCorpus()
-	for name, data := range corpus {
+	bin := needRef(t)
+	for name, data := range crossCheckCorpus() {
 		if len(data) == 0 || len(data) > 1<<20 {
 			continue
 		}
 		for level := -1; level <= 9; level++ {
-			cOut, err := CompressOpts(data, 1751038273, level, 3)
-			if err != nil {
-				t.Fatalf("%s level=%d: CGO failed: %v", name, level, err)
-			}
+			cOut := refGzip(t, bin, data, level, 1751038273, 3, -1)
 			goOut := zdeflate.GzipCompressLevel(data, 1751038273, level, 3)
 			if !bytes.Equal(cOut, goOut) {
-				t.Errorf("%s level=%d: CompressLevel output mismatch", name, level)
+				t.Errorf("%s level=%d: one-shot GZIP output mismatch", name, level)
 			}
 		}
 	}
 }
 
 // TestCrossCheckFuzz cross-checks a large number of randomly generated inputs
-// using a fixed seed. Set the ZLIB_FUZZ_ITER / ZLIB_FUZZ_SEED environment
-// variables to increase intensity.
+// using a fixed seed. Set the ZLIB_FUZZ_ITER / ZLIB_FUZZ_SEED / ZLIB_FUZZ_MAXSIZE
+// environment variables to increase intensity.
 func TestCrossCheckFuzz(t *testing.T) {
+	bin := needRef(t)
 	iterations := 300
 	if testing.Short() {
 		iterations = 50
@@ -181,10 +177,7 @@ func TestCrossCheckFuzz(t *testing.T) {
 		}
 		level := rng.Intn(10)
 
-		cOut, err := cgoDeflateRaw(data, level)
-		if err != nil {
-			t.Fatalf("fuzz#%d: C deflate failed: %v", i, err)
-		}
+		cOut := refDeflateRaw(t, bin, data, level)
 		goOut := zdeflate.CompressLevel(data, level)
 		if !bytes.Equal(cOut, goOut) {
 			idx := firstDiff(cOut, goOut)
@@ -192,17 +185,4 @@ func TestCrossCheckFuzz(t *testing.T) {
 				i, size, alpha, level, len(cOut), len(goOut), idx)
 		}
 	}
-}
-
-func firstDiff(a, b []byte) int {
-	n := len(a)
-	if len(b) < n {
-		n = len(b)
-	}
-	for i := 0; i < n; i++ {
-		if a[i] != b[i] {
-			return i
-		}
-	}
-	return n
 }

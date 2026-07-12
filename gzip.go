@@ -260,7 +260,8 @@ func (z *Writer) ensureStarted() error {
 	if z.Comment != "" {
 		flg |= flagComment
 	}
-	// The fixed 10-byte part is byte-identical to frame_gzip in internal/czlib/gzip.c (XFL=0)
+	// The fixed 10-byte part is byte-identical to the framing in
+	// native/gzip_ref.cpp compress mode (XFL=0)
 	hdr := [10]byte{
 		0x1f, 0x8b, 0x08, flg,
 		byte(mtime), byte(mtime >> 8), byte(mtime >> 16), byte(mtime >> 24),
