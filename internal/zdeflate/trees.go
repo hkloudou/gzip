@@ -9,7 +9,13 @@
 // ported line by line from the zlib source, with no "optimization" changes.
 //
 // This file corresponds to zlib's trees.c.
+//
+// The one deliberate mechanical deviation: C's 16-bit bi_buf is widened to a
+// 64-bit accumulator in sendBits/biFlush/biWindup. The emitted bit stream —
+// and therefore every output byte — is identical; see sendBits.
 package zdeflate
+
+import "encoding/binary"
 
 const (
 	lengthCodes = 29                         // number of length codes (not counting END_BLOCK)
@@ -20,7 +26,6 @@ const (
 	heapSize    = 2*lCodes + 1               // 573
 	maxBits     = 15                         // maximum code length
 	maxBlBits   = 7                          // maximum code length for the bit length tree
-	bufSize     = 16                         // number of bits in bi_buf (Buf_size)
 
 	endBlock   = 256 // end-of-block symbol
 	rep3_6     = 16  // repeat previous bit length 3-6 times
@@ -184,17 +189,23 @@ func (s *state) putShort(w uint16) {
 	s.putByte(byte(w >> 8))
 }
 
-// sendBits corresponds to the send_bits macro (non-DEBUG version)
+// sendBits corresponds to the send_bits macro, with C's 16-bit bi_buf widened
+// to a 64-bit accumulator: bits are still emitted least-significant first in
+// the same order, so the byte stream is unchanged; only the point at which
+// full bytes move to the pending buffer differs (never later than C would
+// have observed them via flush_pending, which always drains through biFlush
+// or biWindup below). length <= 15 and biValid < 48 on entry, so the shifted
+// value always fits.
 func (s *state) sendBits(value, length int) {
-	if s.biValid > bufSize-length {
-		val := value
-		s.biBuf |= uint16(val) << uint(s.biValid)
-		s.putShort(s.biBuf)
-		s.biBuf = uint16(val) >> uint(bufSize-s.biValid)
-		s.biValid += length - bufSize
-	} else {
-		s.biBuf |= uint16(value) << uint(s.biValid)
-		s.biValid += length
+	s.biBuf |= uint64(value) << uint(s.biValid)
+	s.biValid += length
+	if s.biValid >= 48 {
+		b := s.pendingBuf[s.pending : s.pending+6]
+		binary.LittleEndian.PutUint32(b, uint32(s.biBuf))
+		binary.LittleEndian.PutUint16(b[4:], uint16(s.biBuf>>32))
+		s.pending += 6
+		s.biBuf >>= 48
+		s.biValid -= 48
 	}
 }
 
@@ -202,13 +213,10 @@ func (s *state) sendCode(c int, tree []ctData) {
 	s.sendBits(int(tree[c].fc), int(tree[c].dl))
 }
 
-// biFlush flushes the bit buffer, keeping at most 7 bits
+// biFlush flushes the bit buffer down to a byte residue, keeping at most 7
+// bits (the same residue C's bi_flush leaves: the total bit count mod 8)
 func (s *state) biFlush() {
-	if s.biValid == 16 {
-		s.putShort(s.biBuf)
-		s.biBuf = 0
-		s.biValid = 0
-	} else if s.biValid >= 8 {
+	for s.biValid >= 8 {
 		s.putByte(byte(s.biBuf))
 		s.biBuf >>= 8
 		s.biValid -= 8
@@ -217,10 +225,10 @@ func (s *state) biFlush() {
 
 // biWindup flushes the bit buffer and aligns to a byte boundary
 func (s *state) biWindup() {
-	if s.biValid > 8 {
-		s.putShort(s.biBuf)
-	} else if s.biValid > 0 {
+	for s.biValid > 0 {
 		s.putByte(byte(s.biBuf))
+		s.biBuf >>= 8
+		s.biValid -= 8
 	}
 	s.biBuf = 0
 	s.biValid = 0
