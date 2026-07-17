@@ -181,6 +181,7 @@ stick, not developer containers:
 | native (ubuntu x64 + arm64/macos) | **Cross-check matrix**: real zlib vs pure Go, byte-for-byte on real x86-64, arm64 and Apple hardware, against three referees — the **official zlib 1.3.1 tarball** (pinned SHA-256; the byte-correctness pin, independent of this repository), the **official zlib 1.3.2 tarball** (the newest release, same pinning), and the system zlib — on macOS that is Apple's libz, so Apple-platform compatibility is re-verified every run. Matrix: 8 corpora × 11 levels × flush positions + streaming call sequences + MTIME × OS dimensions + all header parameters + empty input |
 | race (x64 + arm64) | Full test suite (referee included) under the Go race detector, with dedicated `sync.Pool` adversarial tests (concurrent cross-contamination, scratch aliasing, chunk-boundary stress, Writer reuse); the arm64 leg exercises the weaker memory ordering x86 hides |
 | sanitize | ASan + LeakSanitizer over every referee mode (compress/stream/header/bench × parameter edge cases), for both official zlib builds (1.3.1 + 1.3.2) |
+| lowmem | The `-tags gziplowmem` build option (memory-priority symbol layout): full test suite + byte parity against both official referees |
 | fuzz | 500 random inputs × random levels, real zlib vs pure Go byte comparison |
 | bench | Four-way benchmark (C++ zlib 1.3.1 / C++ zlib 1.3.2 / pure Go / std Go, with memory stats); auto-updates the table below on push to main. A second arm64 run goes to the job summary (regression watch for arm64) |
 | cross-build | Pure-Go cross-compilation for linux/arm64, windows, darwin/arm64, js/wasm |
@@ -237,11 +238,18 @@ differ by design, which is the reason this library exists.
 
 ## Memory notes
 
-- Compressor state (window/hash tables/symbol buffers, ~320KB measured) is
-  reused via `sync.Pool` — one-shot compression allocates exactly once (the
-  result slice). Pool correctness gets dedicated adversarial tests
-  (concurrent cross-contamination, scratch aliasing, chunk-boundary stress,
-  Writer reuse) run under the race detector in CI;
+- Compressor state (~330KB: LZ77 window, hash tables, pending buffer,
+  symbol arrays) is reused via `sync.Pool` — one-shot compression
+  allocates exactly once (the result slice). Building with
+  `-tags gziplowmem` switches the symbol storage to C zlib's exact
+  `sym_buf`/`pending_buf` overlay, saving 48KB (~15%) of state per
+  compressor at a measured speed cost (level 1 ≈ +4.5%, x86-64 random
+  input ≈ +4.6%, most other cases within ±1%; the default build is
+  speed-first). Both builds emit identical bytes and both are
+  byte-verified against the C referees in CI. Pool correctness gets
+  dedicated adversarial tests (concurrent cross-contamination, scratch
+  aliasing, chunk-boundary stress, Writer reuse) run under the race
+  detector in CI;
 - `gzip.Writer` is truly streaming: `Write` compresses incrementally and
   pushes downstream without buffering the whole input (O(1) memory for
   large files); internal output scratch is pooled too, and the steady-state

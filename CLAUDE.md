@@ -99,6 +99,29 @@ Performance work is measured on CI hardware, not developer containers
 (`abbench.yml`) on the candidate branch — interleaved base-vs-head sampling
 with benchstat on free x86-64 and arm64 runners.
 
+## Performance policy
+
+Priority order: (1) byte-correctness — non-negotiable, see the rules
+above; (2) speed; (3) memory. When speed and memory genuinely conflict
+(measured by the A/B workflow, both architectures), **speed wins the
+default build**; a memory-priority variant behind a build tag is
+acceptable — but only for a real, measured conflict, and any such
+variant must join every byte-parity matrix in CI (both configurations
+verified, always).
+
+One-time decision, LIT_MEM (2026-07, decided with A/B data — do not
+re-litigate without new data): the two symbol-buffer layouts genuinely
+conflict, so both exist. The **default** is the split-array layout
+(`sym_split.go`, the same shape as C 1.3.1's optional LIT_MEM mode) —
+speed first. The **`gziplowmem` build tag** (`sym_lowmem.go`) selects
+C's default non-LIT_MEM layout, sym_buf overlaid into pending_buf: 48KB
+(~15%) less state per compressor, measured slower (A/B, 10 interleaved
+rounds, p=0.000: EPYC x86-64 Random_1MB +4.6% and level1 +3.8% but
+JSON_64KB -3.5% and WriterStream -4.3%, geomean +0.03%; arm64 level1
++4.5%, geomean +0.78%). Output bytes are identical in both builds —
+`make test-lowmem` and the CI `lowmem` job keep the option
+byte-verified against both official referees.
+
 ## Contribution flow
 
 Changes go through PRs; wait for the Codex review and judge each of its
