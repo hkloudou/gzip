@@ -8,13 +8,14 @@ import (
 	"io"
 )
 
-// Flush constants, values identical to zlib.
+// Flush constants, values identical to zlib. Z_PARTIAL_FLUSH (1) and
+// Z_FULL_FLUSH (3) are equally valid Deflate inputs (the internal C port
+// handles all five modes and the streaming cross-check matrix exercises
+// them by value); only the modes the product Writer uses get named here.
 const (
-	NoFlush      = zNoFlush      // Z_NO_FLUSH: just feed data, no forced block boundary
-	PartialFlush = zPartialFlush // Z_PARTIAL_FLUSH: align with an empty static block
-	SyncFlush    = zSyncFlush    // Z_SYNC_FLUSH: end block + 00 00 FF FF marker
-	FullFlush    = zFullFlush    // Z_FULL_FLUSH: like SYNC and also clears the dictionary
-	Finish       = zFinish       // Z_FINISH: finalize the stream
+	NoFlush   = zNoFlush   // Z_NO_FLUSH: just feed data, no forced block boundary
+	SyncFlush = zSyncFlush // Z_SYNC_FLUSH: end block + 00 00 FF FF marker
+	Finish    = zFinish    // Z_FINISH: finalize the stream
 )
 
 var (
@@ -34,20 +35,12 @@ const streamChunk = 1 << 18 // 256KB
 
 // Deflater is a streaming raw deflate compressor (windowBits=-15,
 // memLevel=8, default strategy), corresponding to one long-lived z_stream.
-// Not safe for concurrent use.
+// Use it as a value and (re)arm it with Init — the product Writer embeds
+// one this way for zero per-stream allocations. Not safe for concurrent
+// use.
 type Deflater struct {
 	s      *state
 	closed bool
-}
-
-// NewDeflater creates a streaming compressor. Levels match zlib: -1 means
-// default (6), otherwise 0-9.
-func NewDeflater(level int) (*Deflater, error) {
-	d := new(Deflater)
-	if err := d.Init(level); err != nil {
-		return nil, err
-	}
-	return d, nil
 }
 
 // Init (re)arms a Deflater for a new stream, taking compressor state from
