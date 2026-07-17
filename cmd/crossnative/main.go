@@ -551,10 +551,15 @@ func runBench(bins []string, benchTime time.Duration, readmePath, outPath string
 		})
 		// Standard library compress/gzip: performance context only — its
 		// output bytes differ by design (that is why this library exists).
-		// The Writer is reused via Reset, mirroring the pooled reuse of the
-		// other legs.
+		// The Writer and buffer are reused via Reset (mirroring the pooled
+		// reuse of the other legs), and the op ends by delivering a fresh
+		// exact-size result slice — the same one-shot contract the Pure Go
+		// leg fulfills — so the speed and memory columns compare the same
+		// job on both sides. (Without the copy, Std Go showed a misleading
+		// 0 B/op: it had produced no caller-owned result at all.)
 		var stdBuf bytes.Buffer
 		stdW := stdgzip.NewWriter(&stdBuf)
+		var stdSink []byte
 		row.std = benchGo(c.data, func(data []byte) {
 			stdBuf.Reset()
 			stdW.Reset(&stdBuf)
@@ -564,7 +569,11 @@ func runBench(bins []string, benchTime time.Duration, readmePath, outPath string
 			if err := stdW.Close(); err != nil {
 				panic(err)
 			}
+			out := make([]byte, stdBuf.Len())
+			copy(out, stdBuf.Bytes())
+			stdSink = out
 		})
+		_ = stdSink
 		natives := make([]string, len(bins))
 		for i, ns := range row.nativeN {
 			natives[i] = fmtNs(ns)
@@ -708,7 +717,7 @@ func renderMarkdown(bins []string, rows []benchRow) string {
 		}
 		fmt.Fprintf(&b, " %s |\n", ratioCell(stdNs/pureNs))
 	}
-	b.WriteString("\n**Memory** (Go heap per op; the native referee is a subprocess and has no Go heap; Std Go compresses into a reused bytes.Buffer while Pure Go returns a fresh exact-size slice per op):\n\n")
+	b.WriteString("\n**Memory** (Go heap per op; the native referee is a subprocess and has no Go heap. Both Go columns do the same job — compressor state and buffers are reused, and each op delivers a fresh exact-size result slice):\n\n")
 	b.WriteString("| Input | Pure Go | Std Go |\n")
 	b.WriteString("|---|---|---|\n")
 	for _, r := range rows {
