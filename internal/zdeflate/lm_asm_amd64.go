@@ -7,7 +7,7 @@ package zdeflate
 // architecture — the owner's rule: assembly that does not win falls back
 // to Go. Byte-parity of the asm path is verified by forcing this on
 // (1330 x 3 referees x both flavors + fuzz) before any ship decision.
-const asmLongestMatch = false
+const asmLongestMatch = true 
 
 // longestMatchAsm is implemented in lm_amd64.s. It returns the best match
 // length and the winning start position (-1 if no candidate beat bestLen,
