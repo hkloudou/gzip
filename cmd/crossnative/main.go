@@ -381,8 +381,8 @@ func runCheck(bin string) {
 // pureStream replays a (chunk, flush) call sequence with the pure Go
 // streaming implementation (raw deflate) — the twin of gzip_ref stream mode.
 func pureStream(data []byte, level int, chunks, flushes []int) []byte {
-	d, err := zdeflate.NewDeflater(level)
-	must(err)
+	var d zdeflate.Deflater
+	must(d.Init(level))
 	defer d.Close()
 	var raw bytes.Buffer
 	off := 0
@@ -400,8 +400,8 @@ func pureStream(data []byte, level int, chunks, flushes []int) []byte {
 // wrapped in a gzip frame — same semantics as the C reference's
 // CompressWithSyncFlush.
 func pureSyncFlush(data []byte, ts uint32, level int, osByte byte, at int) []byte {
-	d, err := zdeflate.NewDeflater(level)
-	must(err)
+	var d zdeflate.Deflater
+	must(d.Init(level))
 	defer d.Close()
 	var raw bytes.Buffer
 	must(d.Deflate(data[:at], zdeflate.SyncFlush, &raw))

@@ -330,8 +330,8 @@ func TestWriterAllLevelsWithFlush(t *testing.T) {
 // same GZIP framing.
 func replaySequence(t *testing.T, data []byte, ts uint32, level, split int) []byte {
 	t.Helper()
-	d, err := zdeflate.NewDeflater(level)
-	if err != nil {
+	var d zdeflate.Deflater
+	if err := d.Init(level); err != nil {
 		t.Fatal(err)
 	}
 	defer d.Close()
@@ -368,8 +368,8 @@ func replaySequence(t *testing.T, data []byte, ts uint32, level, split int) []by
 // crossnative three-way comparison).
 func syncFlushReference(t *testing.T, data []byte, ts uint32, level, split int) []byte {
 	t.Helper()
-	d, err := zdeflate.NewDeflater(level)
-	if err != nil {
+	var d zdeflate.Deflater
+	if err := d.Init(level); err != nil {
 		t.Fatal(err)
 	}
 	defer d.Close()

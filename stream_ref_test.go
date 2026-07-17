@@ -17,8 +17,8 @@ import (
 // streaming implementation.
 func goDeflateRawStream(t *testing.T, input []byte, level int, chunks []int, flushes []int) []byte {
 	t.Helper()
-	d, err := zdeflate.NewDeflater(level)
-	if err != nil {
+	var d zdeflate.Deflater
+	if err := d.Init(level); err != nil {
 		t.Fatal(err)
 	}
 	defer d.Close()
