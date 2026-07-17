@@ -346,6 +346,9 @@ func (z *Writer) Flush() error {
 // It does not close the underlying io.Writer.
 func (z *Writer) Close() error {
 	if z.err != nil {
+		// The stream already failed: still release the compressor's pooled
+		// resources (state + held scratch) so an errored Writer pins nothing.
+		z.d.Close()
 		return z.err
 	}
 	if z.closed {

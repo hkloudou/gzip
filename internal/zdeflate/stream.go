@@ -65,6 +65,7 @@ func (d *Deflater) Init(level int) error {
 	if !d.closed && d.s != nil {
 		statePool.Put(d.s)
 	}
+	d.releaseScratch() // as Close would; a live re-arm drops the old stream's buffer
 	d.s = statePool.Get().(*state)
 	d.s.reset(level)
 	d.closed = false
@@ -131,6 +132,7 @@ func (d *Deflater) Deflate(p []byte, flush int, w io.Writer) error {
 			if s.inPos == before {
 				s.in = nil
 				s.out = nil
+				d.releaseScratch() // failed stream must not pin the buffer
 				return errors.New("zdeflate: internal error: no progress")
 			}
 		}
@@ -140,11 +142,29 @@ func (d *Deflater) Deflate(p []byte, flush int, w io.Writer) error {
 		s.out = nil
 		if n > 0 {
 			if _, err := w.Write(out[:n]); err != nil {
+				d.releaseScratch() // failed stream must not pin the buffer
 				return err
 			}
 		}
+		// Oversized buffers (unchunked level-0 writes) are not retained:
+		// dropping them here restores the pre-retention maxPooledBuf
+		// behavior; the common streaming sizes stay held until Close.
+		if cap(*d.scratch) > maxPooledBuf {
+			d.releaseScratch()
+		}
 	}
 	return nil
+}
+
+// releaseScratch returns the held output buffer to the pool (dropping it
+// if oversized, as putScratch does). Used by Close, by Init on a live
+// re-arm, and by Deflate's error paths so failed or abandoned streams
+// never pin a buffer.
+func (d *Deflater) releaseScratch() {
+	if d.scratch != nil {
+		putScratch(d.scratch)
+		d.scratch = nil
+	}
 }
 
 // Close releases the internal state (returns it to the pool). The Deflater
@@ -155,10 +175,7 @@ func (d *Deflater) Close() error {
 		return nil
 	}
 	d.closed = true
-	if d.scratch != nil {
-		putScratch(d.scratch)
-		d.scratch = nil
-	}
+	d.releaseScratch()
 	s := d.s
 	d.s = nil
 	if s == nil {
