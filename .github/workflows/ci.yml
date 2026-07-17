@@ -177,24 +177,31 @@ jobs:
           fi
 
   # The low-memory build option (-tags gziplowmem: C's sym_buf/pending_buf
-  # overlay) must stay byte-identical too: full test suite + both official
-  # referees, so both build configurations are verified on every run.
+  # overlay) must stay byte-identical too, on the SAME matrix as the default
+  # build: x86-64, arm64 and macOS, against official 1.3.1 + 1.3.2 + the
+  # system zlib — both build configurations verified everywhere, every run.
   lowmem:
-    name: gziplowmem option (byte parity)
-    runs-on: ubuntu-latest
+    name: gziplowmem option (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: stable
-      - name: build referees (official zlib 1.3.1 + 1.3.2)
-        run: make native-build native-build-132
+      - name: build referees (official 1.3.1 + 1.3.2 tarballs + system zlib)
+        run: |
+          make native-build native-build-132
+          ./bin/gzip_ref version && ./bin/gzip_ref_132 version && ./bin/gzip_ref_system version
       - name: byte parity + tests (-tags gziplowmem)
         run: |
           go vet -tags gziplowmem ./...
           go test -tags gziplowmem ./...
-          go run -tags gziplowmem ./cmd/crossnative -mode check -native ./bin/gzip_ref,./bin/gzip_ref_132
+          go run -tags gziplowmem ./cmd/crossnative -mode check -native ./bin/gzip_ref,./bin/gzip_ref_132,./bin/gzip_ref_system
 
   # Same four-way benchmark on a free arm64 runner (real Cobalt/Graviton
   # class hardware): summary-only — the committed README table stays the

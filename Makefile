@@ -94,12 +94,13 @@ bench:
 
 # Byte parity + full tests for the low-memory build option (-tags
 # gziplowmem: C's sym_buf/pending_buf overlay, 48KB less state per
-# compressor; the default build stays speed-first — see CLAUDE.md)
+# compressor; the default build stays speed-first — see CLAUDE.md).
+# Same referee set as `native`: official 1.3.1 + 1.3.2 + system zlib.
 test-lowmem: native-build native-build-132
 	go vet -tags gziplowmem ./...
 	go test -tags gziplowmem ./...
 	go run -tags gziplowmem ./cmd/crossnative -mode check \
-		-native ./bin/gzip_ref,./bin/gzip_ref_132
+		-native $$(test -x bin/gzip_ref_system && echo ./bin/gzip_ref,./bin/gzip_ref_132,./bin/gzip_ref_system || echo ./bin/gzip_ref,./bin/gzip_ref_132)
 
 # Heavy fuzz cross-check: official-zlib referee vs pure Go, byte-for-byte
 # Usage: make fuzz [ITER=2000] [MAXSIZE=2097152] [SEED=1]
