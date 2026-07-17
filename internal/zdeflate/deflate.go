@@ -893,14 +893,19 @@ func deflateSlow(s *state, flush int) blockState {
 
 			// Insert into the hash table all strings covered by the match:
 			// positions strstart+1 .. strstart+prevLength-2, capped at
-			// maxInsert — exactly the set C's rolling loop inserts. Both
+			// maxInsert — exactly the set C's rolling loop inserts. All
 			// arms compute each hash independently so the inserts do not
 			// serialize on ins_h; insH is then set to hash3(last inserted),
 			// the value C's ins_h holds after its loop. If every position
 			// was skipped (last < first), C leaves ins_h untouched and so
-			// does this path. wideInsertRun is a compile-time constant
-			// (insert_arm64.go / insert_other.go, chosen from A/B CI data),
-			// so each build keeps exactly one arm.
+			// does this path. wideInsertRun and wideRunThreshold are
+			// compile-time constants (tune_arm64.go / tune_other.go, chosen
+			// from A/B CI data): arm64 always calls insertRun; other
+			// architectures call it only for runs long enough to amortize
+			// the call, keeping short runs on the original scalar loop.
+			// insertRun(first, last) is byte-identical to the scalar loop,
+			// so the threshold only picks between two identical-output
+			// paths.
 			s.lookahead -= s.prevLength - 1
 			end := s.strstart + s.prevLength - 2
 			first := s.strstart + 1
@@ -908,7 +913,7 @@ func deflateSlow(s *state, flush int) blockState {
 			if last > maxInsert {
 				last = maxInsert
 			}
-			if wideInsertRun {
+			if wideInsertRun || (wideRunThreshold > 0 && last-first >= wideRunThreshold) {
 				s.insertRun(first, last)
 			} else {
 				for str := first; str <= last; str++ {

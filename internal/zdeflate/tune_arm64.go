@@ -26,3 +26,9 @@ const wideInsertRun = true
 // inputs that never even slide the window (Small_2B +8.9% with slideTable
 // unreachable), so !arm64 keeps the one-word loop and its layout.
 const wideSlideTable = true
+
+// wideRunThreshold is the minimum last-first for a batch-insert run to
+// call insertRun on architectures where wideInsertRun is false. Unused on
+// arm64: wideInsertRun short-circuits the condition at compile time, so
+// insertRun is always called, exactly as before this constant existed.
+const wideRunThreshold = 0
