@@ -3,7 +3,6 @@
 package zdeflate
 
 import (
-	"encoding/binary"
 	"math/bits"
 	"sync"
 	"unsafe"
@@ -422,16 +421,6 @@ func zeroRange(b []byte) {
 	}
 }
 
-// load16m loads window bytes i and i+1 as a little-endian 16-bit value with
-// masked indexing. Every probe position in longestMatch satisfies
-// i+1 < windowSize (match < strstart <= windowSize-minLookahead and
-// bestLen <= maxMatch keep the probes inside the window), so the masks are
-// identity: the same two bytes are loaded, the masks only let the compiler
-// drop the bounds checks in the chain-walking loop.
-func load16m(win *[windowSize]byte, i int) uint16 {
-	return uint16(win[i&(windowSize-1)]) | uint16(win[(i+1)&(windowSize-1)])<<8
-}
-
 // longestMatch finds the longest match starting at curMatch, sets matchStart and
 // returns its length, at most lookahead. Port of the C version with wider loads:
 // the byte loop is replaced by 8-byte XOR compares whose first differing byte
@@ -482,8 +471,7 @@ func (s *state) longestMatch(curMatch int) int {
 			// bytes past the input are zeroed by fillWindow up to highWater
 			matchLen := maxMatch
 			for j := 3; ; {
-				x := binary.LittleEndian.Uint64(win[scan+j:]) ^
-					binary.LittleEndian.Uint64(win[match+j:])
+				x := load64w(win, scan+j) ^ load64w(win, match+j)
 				if x != 0 {
 					matchLen = j + bits.TrailingZeros64(x)>>3
 					break
