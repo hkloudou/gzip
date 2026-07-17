@@ -45,7 +45,11 @@ speculative abstractions, no unnecessary API surface.
    - the `*_ref_test.go` crosscheck / stream / header / fuzz matrices and
      the streaming-output + HTTP tests in the root package;
    - bench: throughput + memory (C++ zlib 1.3.1 + 1.3.2 / pure Go /
-     std Go), auto-written back to the README by CI (AUTOBENCH block);
+     std Go), auto-written back to the README by CI (AUTOBENCH block),
+     plus a summary-only arm64 bench leg;
+   - allocs: TestSteadyStateAllocs pins the pooled paths' per-op
+     allocation counts (one-shot = 1, streaming Writer cycle = 0) — the
+     Go-side leak guard;
    - loc: the line-count bot (AUTOLOC block).
    When adding compression behavior (new parameters, new flush semantics,
    new header fields), extend these matrices in the same change.
@@ -89,6 +93,11 @@ The referee builds download the official tarballs into `.cache/`
 has rotated out). Offline, point `ZLIB131_DIR`/`ZLIB132_DIR` at matching
 zlib source trees (each needs at least
 adler32/crc32/deflate/trees/zutil + headers).
+
+Performance work is measured on CI hardware, not developer containers
+(container noise and toolchain drift mislead): dispatch the A/B workflow
+(`abbench.yml`) on the candidate branch — interleaved base-vs-head sampling
+with benchstat on free x86-64 and arm64 runners.
 
 ## Contribution flow
 

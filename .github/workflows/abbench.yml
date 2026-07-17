@@ -1,0 +1,82 @@
+# On-demand A/B benchmark: the dispatched ref (head) vs a baseline ref,
+# interleaved sampling + benchstat, on free x86-64 AND arm64 runners.
+#
+# This is the measurement tool for optimization work: local containers are
+# noisy and their compilers may differ from CI; this gives every candidate
+# branch clean, statistically qualified numbers (speed + allocs) on the two
+# architectures that matter, for free. Trigger from the Actions tab or:
+#
+#   gh workflow run abbench.yml --ref <candidate-branch> \
+#     [-f base=origin/main] [-f pattern=...] [-f benchtime=1s] [-f rounds=10]
+#
+# Samples are interleaved (base, head, base, head, ...) so slow drift of the
+# shared runner affects both sides equally; benchstat then reports the delta
+# with confidence intervals.
+name: A/B bench
+
+on:
+  workflow_dispatch:
+    inputs:
+      base:
+        description: "Baseline ref to compare against"
+        required: false
+        default: "origin/main"
+      pattern:
+        description: "go test -bench regexp"
+        required: false
+        default: "BenchmarkGzip$/PureGo|BenchmarkWriterStream|BenchmarkGzipLevels"
+      benchtime:
+        description: "-benchtime per sample"
+        required: false
+        default: "1s"
+      rounds:
+        description: "interleaved rounds (samples per side)"
+        required: false
+        default: "10"
+
+jobs:
+  ab:
+    name: A/B (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+    env:
+      BASE: ${{ inputs.base }}
+      PATTERN: ${{ inputs.pattern }}
+      BENCHTIME: ${{ inputs.benchtime }}
+      ROUNDS: ${{ inputs.rounds }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      - name: build head and base benchmark binaries
+        run: |
+          go test -c -o /tmp/head.test .
+          git worktree add /tmp/base-src "$BASE"
+          (cd /tmp/base-src && go test -c -o /tmp/base.test .)
+      - name: interleaved benchmark
+        run: |
+          for i in $(seq "$ROUNDS"); do
+            echo "== round $i/$ROUNDS =="
+            /tmp/base.test -test.bench "$PATTERN" -test.run '^$' \
+              -test.benchtime "$BENCHTIME" -test.benchmem >> /tmp/base.txt
+            /tmp/head.test -test.bench "$PATTERN" -test.run '^$' \
+              -test.benchtime "$BENCHTIME" -test.benchmem >> /tmp/head.txt
+          done
+      - name: benchstat (base vs head)
+        run: |
+          {
+            echo "## A/B bench on ${{ matrix.runner }}"
+            echo ""
+            echo "base: \`$BASE\` ($(git -C /tmp/base-src rev-parse --short HEAD)) vs head: \`$GITHUB_REF_NAME\` ($(git rev-parse --short HEAD)), $ROUNDS rounds × $BENCHTIME"
+            echo ""
+            echo '```'
+            go run golang.org/x/perf/cmd/benchstat@latest /tmp/base.txt /tmp/head.txt
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

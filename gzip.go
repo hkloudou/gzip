@@ -136,12 +136,17 @@ type Writer struct {
 	Header
 	w           io.Writer
 	level       int
-	d           *zdeflate.Deflater
+	d           zdeflate.Deflater // by value, re-armed via Init: no per-stream allocation
 	wroteHeader bool
 	closed      bool
 	err         error
 	crc         uint32
 	size        uint32
+	// wbuf is reusable scratch for the fixed header, trailer and length
+	// prefixes; writing through a field (instead of a local array) keeps
+	// the steady-state streaming path free of per-stream heap allocations
+	// (locals passed to the io.Writer interface would escape).
+	wbuf [10]byte
 }
 
 // NewWriter creates a Writer with the default level (zlib level 6).
@@ -167,10 +172,7 @@ func NewWriterLevel(w io.Writer, level int) (*Writer, error) {
 // Reset resets the Writer for reuse (the level is kept; the header is
 // reset to its defaults).
 func (z *Writer) Reset(w io.Writer) {
-	if z.d != nil {
-		z.d.Close()
-		z.d = nil
-	}
+	z.d.Close()
 	z.Header = Header{OS: 3}
 	z.w = w
 	z.wroteHeader = false
@@ -194,10 +196,9 @@ func (z *Writer) writeBytes(b []byte) error {
 	if len(b) > 0xffff {
 		return errors.New("gzip: extra data is too large")
 	}
-	var buf [2]byte
-	buf[0] = byte(len(b))
-	buf[1] = byte(len(b) >> 8)
-	if _, err := z.w.Write(buf[:]); err != nil {
+	z.wbuf[0] = byte(len(b))
+	z.wbuf[1] = byte(len(b) >> 8)
+	if _, err := z.w.Write(z.wbuf[:2]); err != nil {
 		return err
 	}
 	_, err := z.w.Write(b)
@@ -262,12 +263,12 @@ func (z *Writer) ensureStarted() error {
 	}
 	// The fixed 10-byte part is byte-identical to the framing in
 	// native/gzip_ref.cpp compress mode (XFL=0)
-	hdr := [10]byte{
+	z.wbuf = [10]byte{
 		0x1f, 0x8b, 0x08, flg,
 		byte(mtime), byte(mtime >> 8), byte(mtime >> 16), byte(mtime >> 24),
 		0x00, z.OS,
 	}
-	if _, err := z.w.Write(hdr[:]); err != nil {
+	if _, err := z.w.Write(z.wbuf[:]); err != nil {
 		return err
 	}
 	// Optional fields in fixed order: FEXTRA, FNAME, FCOMMENT (RFC 1952)
@@ -286,12 +287,7 @@ func (z *Writer) ensureStarted() error {
 			return err
 		}
 	}
-	d, err := zdeflate.NewDeflater(z.level)
-	if err != nil {
-		return err
-	}
-	z.d = d
-	return nil
+	return z.d.Init(z.level)
 }
 
 // Write compresses p in streaming fashion (equivalent to C zlib's
@@ -365,14 +361,13 @@ func (z *Writer) Close() error {
 		return err
 	}
 	z.d.Close()
-	z.d = nil
 
 	// GZIP Trailer (8 bytes)
-	trailer := [8]byte{
+	z.wbuf = [10]byte{
 		byte(z.crc), byte(z.crc >> 8), byte(z.crc >> 16), byte(z.crc >> 24),
 		byte(z.size), byte(z.size >> 8), byte(z.size >> 16), byte(z.size >> 24),
 	}
-	if _, err := z.w.Write(trailer[:]); err != nil {
+	if _, err := z.w.Write(z.wbuf[:8]); err != nil {
 		z.err = err
 		return err
 	}
