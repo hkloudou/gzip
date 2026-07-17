@@ -56,8 +56,11 @@ func BenchmarkGzip(b *testing.B) {
 			}
 		})
 		b.Run("StdGo/"+c.name, func(b *testing.B) {
+			// Same job as the PureGo leg: reuse the compressor, deliver a
+			// fresh exact-size result slice per op (see cmd/crossnative).
 			var buf bytes.Buffer
 			w := stdgzip.NewWriter(&buf)
+			var sink []byte
 			b.SetBytes(int64(len(c.data)))
 			b.ReportAllocs()
 			b.ResetTimer()
@@ -70,7 +73,11 @@ func BenchmarkGzip(b *testing.B) {
 				if err := w.Close(); err != nil {
 					b.Fatal(err)
 				}
+				out := make([]byte, buf.Len())
+				copy(out, buf.Bytes())
+				sink = out
 			}
+			_ = sink
 		})
 	}
 }
