@@ -899,8 +899,10 @@ func deflateSlow(s *state, flush int) blockState {
 			// the value C's ins_h holds after its loop. If every position
 			// was skipped (last < first), C leaves ins_h untouched and so
 			// does this path. wideInsertRun is a compile-time constant
-			// (insert_arm64.go / insert_other.go, chosen from A/B CI data),
-			// so each build keeps exactly one arm.
+			// (tune_arm64.go / tune_other.go, chosen from A/B CI data —
+			// including the closed x86 threshold experiments recorded
+			// there), so each build keeps exactly one arm; insertRun is
+			// byte-identical to the scalar loop either way.
 			s.lookahead -= s.prevLength - 1
 			end := s.strstart + s.prevLength - 2
 			first := s.strstart + 1

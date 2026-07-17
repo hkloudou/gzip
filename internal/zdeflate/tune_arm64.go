@@ -12,10 +12,17 @@ package zdeflate
 // deflateSlow batch inserts (PR #10): on arm64 (Cobalt 100) the wide path
 // is a -10.16% sec/op geomean — JSON_64KB -37.3%, WriterStream -24.2%,
 // Large_2KB -21.2%, JSON_1MB -9.3%, no regressions (all p=0.000) — the
-// per-hash triple byte loads bottleneck arm64's load ports. On x86-64
-// (Xeon 8370C) the same change was a net +0.99% geomean regression (deep
-// OOO already hides the byte loads; the call overhead costs more than the
-// load savings), so !arm64 keeps the scalar insertPos loop.
+// per-hash triple byte loads bottleneck arm64's load ports. !arm64 keeps
+// the scalar insertPos loop: CLOSED DECISION (2026-07, PRs #10/#12 — do
+// not re-litigate without new data). Three x86 A/B rounds landed on three
+// microarchitectures and disagreed on the sign — unconditional on Xeon
+// 8370C +0.99% geomean; run-length threshold 12 on EPYC 7763 -1.18%
+// (JSON_64KB -12.8%); threshold 32 on EPYC 9V74 +1.43% (the same
+// JSON_64KB win shrank to -2.5%, the JSON_1MB family regressed +2.8%) —
+// with +3..13% binary-layout phantoms on inputs that never reach the
+// branch in every round. The x86 benefit is microarch-dependent and not
+// reproducible across GitHub's runner pool (or user machines); arm64's
+// win reproduced on the same Cobalt hardware every round.
 const wideInsertRun = true
 
 // wideSlideTable selects slideTable's two-words-per-iteration loop
