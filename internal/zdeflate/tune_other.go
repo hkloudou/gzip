@@ -11,13 +11,18 @@ const (
 	wideSlideTable = false // slideTable: one word per iteration
 )
 
-// wideRunThreshold: batch-insert runs with last-first >= this call
-// insertRun; shorter runs keep the original scalar insertPos loop
-// (0 would disable the call entirely). Two x86 A/B rounds drew the
-// boundary (PR #10 round 1, unconditional; PR #12 round 1, threshold 12,
-// EPYC 7763): long runs win big — JSON_64KB -12.8%, Large_2KB -5.6%,
-// WriterStream -4.3%, all with ~250-position runs — while the 13-23
-// position runs of the JSON_1MB family still lost ~1.7%. 32 puts the
-// whole measured losing range (and a margin) back on the scalar loop
-// while every measured winner (~250-position runs) keeps the wide call.
-const wideRunThreshold = 32
+// wideRunThreshold: batch-insert runs with last-first >= this would call
+// insertRun; 0 disables the call entirely (the condition constant-folds
+// away, leaving the original scalar loop and codegen). CLOSED DECISION
+// (2026-07, PRs #10/#12 — do not re-litigate without new data): three
+// A/B rounds landed on three different x86 microarchitectures and
+// disagreed on the sign — unconditional on Xeon 8370C was +0.99% geomean,
+// threshold 12 on EPYC 7763 was -1.18% (JSON_64KB -12.8%), threshold 32
+// on EPYC 9V74 was +1.43% (the same JSON_64KB win shrank to -2.5% and the
+// JSON_1MB family regressed +2.8%), with binary-layout phantoms of
+// +3..13% on inputs that never reach this branch in every round. The
+// wide-path benefit on x86 is microarch-dependent and not reproducible
+// across GitHub's runner pool (or user machines), so non-arm64 keeps the
+// scalar loop; the reproducible wide-path win ships on arm64 only
+// (wideInsertRun, measured on the same Cobalt hardware every round).
+const wideRunThreshold = 0
