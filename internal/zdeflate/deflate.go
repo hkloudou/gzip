@@ -316,6 +316,68 @@ func (s *state) insertPos(str int) {
 	s.head[h] = uint16(str)
 }
 
+// insertRun performs insertPos(str) for str = first..last (inclusive,
+// no-op when last < first) — deflateSlow's proven-hot batch-insert loop,
+// selected on arm64 only (wideInsertRun, see insert_arm64.go for the A/B
+// data). Instead of three window byte loads per position,
+// one 8-byte little-endian load sources six consecutive hashes: byte k of
+// load64w(&s.window, str) is window[str+k] (both load flavors are
+// little-endian), so each hK below is literally hash3(str+k) — the same
+// three bytes, the same shifts, the same mask. Chain updates issue in
+// ascending position order exactly like the scalar loop, so when two
+// positions share a hash bucket the later prev link still reads the earlier
+// insert's head entry: every head/prev value stored is byte-identical to
+// calling insertPos in order. Positions beyond wideEnd fall back to
+// insertPos itself.
+//
+// Bounds: lane k uses window bytes str+k..str+k+2, and str+5 <= last keeps
+// every used lane at a position <= last, whose bytes are valid window data
+// at every call site (each inserted position satisfies str+2 < valid end,
+// as for insertPos). The load touches window[str..str+7], so the wide loop
+// also stops at windowSize-8 (the masked fast-flavor load would otherwise
+// run past the array and the portable flavor would slice-panic); the scalar
+// tail covers the last few positions near the window end.
+func (s *state) insertRun(first, last int) {
+	str := first
+	wideEnd := last - 5
+	if wideEnd > windowSize-8 {
+		wideEnd = windowSize - 8
+	}
+	for str <= wideEnd {
+		x := load64w(&s.window, str)
+		b0 := uint32(x) & 0xff
+		b1 := uint32(x>>8) & 0xff
+		b2 := uint32(x>>16) & 0xff
+		b3 := uint32(x>>24) & 0xff
+		b4 := uint32(x>>32) & 0xff
+		b5 := uint32(x>>40) & 0xff
+		b6 := uint32(x>>48) & 0xff
+		b7 := uint32(x >> 56)
+		h0 := (b0<<(2*hashShift) ^ b1<<hashShift ^ b2) & hashMask
+		h1 := (b1<<(2*hashShift) ^ b2<<hashShift ^ b3) & hashMask
+		h2 := (b2<<(2*hashShift) ^ b3<<hashShift ^ b4) & hashMask
+		h3 := (b3<<(2*hashShift) ^ b4<<hashShift ^ b5) & hashMask
+		h4 := (b4<<(2*hashShift) ^ b5<<hashShift ^ b6) & hashMask
+		h5 := (b5<<(2*hashShift) ^ b6<<hashShift ^ b7) & hashMask
+		s.prev[str&wMask] = s.head[h0]
+		s.head[h0] = uint16(str)
+		s.prev[(str+1)&wMask] = s.head[h1]
+		s.head[h1] = uint16(str + 1)
+		s.prev[(str+2)&wMask] = s.head[h2]
+		s.head[h2] = uint16(str + 2)
+		s.prev[(str+3)&wMask] = s.head[h3]
+		s.head[h3] = uint16(str + 3)
+		s.prev[(str+4)&wMask] = s.head[h4]
+		s.head[h4] = uint16(str + 4)
+		s.prev[(str+5)&wMask] = s.head[h5]
+		s.head[h5] = uint16(str + 5)
+		str += 6
+	}
+	for ; str <= last; str++ {
+		s.insertPos(str)
+	}
+}
+
 // slideHash shifts the hash tables in step when the window slides down.
 // Each entry becomes m >= wSize ? m-wSize : nilPos(0); wSize is 1<<15, so the
 // condition is exactly the top bit of the 16-bit entry. (For prev, entries not
@@ -717,7 +779,10 @@ func deflateFast(s *state, flush int) blockState {
 				// ins_h; insH is then set to hash3(last), the value C's
 				// ins_h holds after its loop, so the rolling path continues
 				// identically. matchLength >= minMatch here, so the loop
-				// always inserts at least one position.
+				// always inserts at least one position. (insertRun is not
+				// used here: matchLength <= maxLazyMatch <= 6 at levels 1-3
+				// keeps every run under insertRun's 6-position wide chunk,
+				// so it could only ever take insertRun's scalar tail.)
 				last := s.strstart + s.matchLength - 1
 				for str := s.strstart + 1; str <= last; str++ {
 					s.insertPos(str)
@@ -806,12 +871,14 @@ func deflateSlow(s *state, flush int) blockState {
 
 			// Insert into the hash table all strings covered by the match:
 			// positions strstart+1 .. strstart+prevLength-2, capped at
-			// maxInsert — exactly the set C's rolling loop inserts.
-			// insertPos computes each hash independently so the inserts do
-			// not serialize on ins_h; insH is then set to hash3(last
-			// inserted), the value C's ins_h holds after its loop. If every
-			// position was skipped (last < first), C leaves ins_h untouched
-			// and so does this path.
+			// maxInsert — exactly the set C's rolling loop inserts. Both
+			// arms compute each hash independently so the inserts do not
+			// serialize on ins_h; insH is then set to hash3(last inserted),
+			// the value C's ins_h holds after its loop. If every position
+			// was skipped (last < first), C leaves ins_h untouched and so
+			// does this path. wideInsertRun is a compile-time constant
+			// (insert_arm64.go / insert_other.go, chosen from A/B CI data),
+			// so each build keeps exactly one arm.
 			s.lookahead -= s.prevLength - 1
 			end := s.strstart + s.prevLength - 2
 			first := s.strstart + 1
@@ -819,8 +886,12 @@ func deflateSlow(s *state, flush int) blockState {
 			if last > maxInsert {
 				last = maxInsert
 			}
-			for str := first; str <= last; str++ {
-				s.insertPos(str)
+			if wideInsertRun {
+				s.insertRun(first, last)
+			} else {
+				for str := first; str <= last; str++ {
+					s.insertPos(str)
+				}
 			}
 			if last >= first {
 				s.insH = s.hash3(last)
