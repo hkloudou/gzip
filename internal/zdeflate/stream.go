@@ -43,15 +43,32 @@ type Deflater struct {
 // NewDeflater creates a streaming compressor. Levels match zlib: -1 means
 // default (6), otherwise 0-9.
 func NewDeflater(level int) (*Deflater, error) {
+	d := new(Deflater)
+	if err := d.Init(level); err != nil {
+		return nil, err
+	}
+	return d, nil
+}
+
+// Init (re)arms a Deflater for a new stream, taking compressor state from
+// the pool. It may be called on a zero-value or previously Closed Deflater,
+// letting callers embed one by value and reuse it with zero per-stream heap
+// allocations. Calling Init on a live (non-closed) Deflater first releases
+// its state, as Close would.
+func (d *Deflater) Init(level int) error {
 	if level == -1 {
 		level = 6
 	}
 	if level < 0 || level > 9 {
-		return nil, errors.New("zdeflate: invalid compression level")
+		return errors.New("zdeflate: invalid compression level")
 	}
-	d := &Deflater{s: statePool.Get().(*state)}
+	if !d.closed && d.s != nil {
+		statePool.Put(d.s)
+	}
+	d.s = statePool.Get().(*state)
 	d.s.reset(level)
-	return d, nil
+	d.closed = false
+	return nil
 }
 
 // Deflate is equivalent to C's deflate(strm, flush) (with avail_out always
@@ -64,7 +81,7 @@ func NewDeflater(level int) (*Deflater, error) {
 //
 // The same sequence of (p, flush) calls as C zlib yields byte-identical output.
 func (d *Deflater) Deflate(p []byte, flush int, w io.Writer) error {
-	if d.closed {
+	if d.closed || d.s == nil { // nil s: zero value, needs Init first
 		return ErrDeflaterClosed
 	}
 	if flush < NoFlush || flush > Finish {
@@ -128,7 +145,8 @@ func (d *Deflater) Deflate(p []byte, flush int, w io.Writer) error {
 }
 
 // Close releases the internal state (returns it to the pool). The Deflater
-// must not be used afterwards.
+// must not be used afterwards (Init re-arms it). Safe on a zero-value or
+// already-closed Deflater.
 func (d *Deflater) Close() error {
 	if d.closed {
 		return nil
@@ -136,6 +154,9 @@ func (d *Deflater) Close() error {
 	d.closed = true
 	s := d.s
 	d.s = nil
+	if s == nil {
+		return nil
+	}
 	s.in = nil
 	s.out = nil
 	statePool.Put(s)
