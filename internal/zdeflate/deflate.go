@@ -394,11 +394,25 @@ func (s *state) slideHash() {
 // bit set become lane-0x8000, all others become 0. Shifts and borrows cannot
 // cross a lane (t has only bit 15 of each lane set), and lanes map to entries
 // in memory order regardless of endianness, so the result is identical to the
-// scalar loop. Both tables have a multiple-of-four length (wSize and hashSize).
+// scalar loop. The word loop handles two words per iteration — the pairs are
+// disjoint and each word gets the exact same transform, so this changes only
+// the loop overhead, not a single stored value; the tail loop covers a
+// trailing odd word (never taken today: both tables are 8192 words — wSize/4
+// and hashSize/4 — but kept so no future table length can silently skip an
+// entry). Every entry is written exactly once in both loops combined.
 func slideTable(tab []uint16) {
 	if uintptr(unsafe.Pointer(&tab[0]))&7 == 0 {
 		w := unsafe.Slice((*uint64)(unsafe.Pointer(&tab[0])), len(tab)/4)
-		for i, v := range w {
+		i := 0
+		for ; i+1 < len(w); i += 2 {
+			v0, v1 := w[i], w[i+1]
+			t0 := v0 & 0x8000800080008000
+			t1 := v1 & 0x8000800080008000
+			w[i] = v0 & (t0 - t0>>15)
+			w[i+1] = v1 & (t1 - t1>>15)
+		}
+		for ; i < len(w); i++ {
+			v := w[i]
 			t := v & 0x8000800080008000
 			w[i] = v & (t - t>>15)
 		}
