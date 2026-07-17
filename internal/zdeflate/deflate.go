@@ -339,6 +339,74 @@ func (s *state) insertPos(str int) {
 // tail covers the last few positions near the window end.
 func (s *state) insertRun(first, last int) {
 	str := first
+	// 12-position iterations first: two independent 8-byte loads (x covers
+	// lanes 0-5, y = load at str+6 covers lanes 6-11 the same way), giving
+	// the core two parallel extract chains and half the loop overhead on
+	// the ~250-position runs compressible data produces. Same hashes, same
+	// ascending store order as twelve insertPos calls — the y lanes are
+	// literally hash3(str+6+k). Memory bound: the second load needs
+	// str+6 <= windowSize-8; value bound: lane 11 needs str+11 <= last.
+	wideEnd12 := last - 11
+	if wideEnd12 > windowSize-14 {
+		wideEnd12 = windowSize - 14
+	}
+	for str <= wideEnd12 {
+		x := load64w(&s.window, str)
+		y := load64w(&s.window, str+6)
+		xb0 := uint32(x) & 0xff
+		xb1 := uint32(x>>8) & 0xff
+		xb2 := uint32(x>>16) & 0xff
+		xb3 := uint32(x>>24) & 0xff
+		xb4 := uint32(x>>32) & 0xff
+		xb5 := uint32(x>>40) & 0xff
+		xb6 := uint32(x>>48) & 0xff
+		xb7 := uint32(x >> 56)
+		yb0 := uint32(y) & 0xff
+		yb1 := uint32(y>>8) & 0xff
+		yb2 := uint32(y>>16) & 0xff
+		yb3 := uint32(y>>24) & 0xff
+		yb4 := uint32(y>>32) & 0xff
+		yb5 := uint32(y>>40) & 0xff
+		yb6 := uint32(y>>48) & 0xff
+		yb7 := uint32(y >> 56)
+		h0 := (xb0<<(2*hashShift) ^ xb1<<hashShift ^ xb2) & hashMask
+		h1 := (xb1<<(2*hashShift) ^ xb2<<hashShift ^ xb3) & hashMask
+		h2 := (xb2<<(2*hashShift) ^ xb3<<hashShift ^ xb4) & hashMask
+		h3 := (xb3<<(2*hashShift) ^ xb4<<hashShift ^ xb5) & hashMask
+		h4 := (xb4<<(2*hashShift) ^ xb5<<hashShift ^ xb6) & hashMask
+		h5 := (xb5<<(2*hashShift) ^ xb6<<hashShift ^ xb7) & hashMask
+		h6 := (yb0<<(2*hashShift) ^ yb1<<hashShift ^ yb2) & hashMask
+		h7 := (yb1<<(2*hashShift) ^ yb2<<hashShift ^ yb3) & hashMask
+		h8 := (yb2<<(2*hashShift) ^ yb3<<hashShift ^ yb4) & hashMask
+		h9 := (yb3<<(2*hashShift) ^ yb4<<hashShift ^ yb5) & hashMask
+		h10 := (yb4<<(2*hashShift) ^ yb5<<hashShift ^ yb6) & hashMask
+		h11 := (yb5<<(2*hashShift) ^ yb6<<hashShift ^ yb7) & hashMask
+		s.prev[str&wMask] = s.head[h0]
+		s.head[h0] = uint16(str)
+		s.prev[(str+1)&wMask] = s.head[h1]
+		s.head[h1] = uint16(str + 1)
+		s.prev[(str+2)&wMask] = s.head[h2]
+		s.head[h2] = uint16(str + 2)
+		s.prev[(str+3)&wMask] = s.head[h3]
+		s.head[h3] = uint16(str + 3)
+		s.prev[(str+4)&wMask] = s.head[h4]
+		s.head[h4] = uint16(str + 4)
+		s.prev[(str+5)&wMask] = s.head[h5]
+		s.head[h5] = uint16(str + 5)
+		s.prev[(str+6)&wMask] = s.head[h6]
+		s.head[h6] = uint16(str + 6)
+		s.prev[(str+7)&wMask] = s.head[h7]
+		s.head[h7] = uint16(str + 7)
+		s.prev[(str+8)&wMask] = s.head[h8]
+		s.head[h8] = uint16(str + 8)
+		s.prev[(str+9)&wMask] = s.head[h9]
+		s.head[h9] = uint16(str + 9)
+		s.prev[(str+10)&wMask] = s.head[h10]
+		s.head[h10] = uint16(str + 10)
+		s.prev[(str+11)&wMask] = s.head[h11]
+		s.head[h11] = uint16(str + 11)
+		str += 12
+	}
 	wideEnd := last - 5
 	if wideEnd > windowSize-8 {
 		wideEnd = windowSize - 8
