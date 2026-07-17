@@ -22,7 +22,7 @@ ZLIB132_SRC = $(if $(ZLIB132_DIR),$(ZLIB132_DIR),.cache/zlib-$(ZLIB132_VERSION))
 # matching zlib source tree works, including a deflate-only subset.
 ZLIB_OBJS := adler32 crc32 deflate trees zutil
 
-.PHONY: test bench bench-table fuzz clean zlib-src zlib-src-132 native-build native-build-132 native asan-check
+.PHONY: test test-lowmem bench bench-table fuzz clean zlib-src zlib-src-132 native-build native-build-132 native asan-check
 
 # Fetch + verify an official zlib source tarball (cached under .cache/,
 # gitignored). zlib.net moves superseded releases to fossils/, hence the
@@ -91,6 +91,16 @@ bench-table: native-build native-build-132
 # Pure Go vs std Go micro-benchmarks (for pprof work)
 bench:
 	go test -bench 'BenchmarkGzip' -benchmem -run '^$$' .
+
+# Byte parity + full tests for the low-memory build option (-tags
+# gziplowmem: C's sym_buf/pending_buf overlay, 48KB less state per
+# compressor; the default build stays speed-first — see CLAUDE.md).
+# Same referee set as `native`: official 1.3.1 + 1.3.2 + system zlib.
+test-lowmem: native-build native-build-132
+	go vet -tags gziplowmem ./...
+	go test -tags gziplowmem ./...
+	go run -tags gziplowmem ./cmd/crossnative -mode check \
+		-native $$(test -x bin/gzip_ref_system && echo ./bin/gzip_ref,./bin/gzip_ref_132,./bin/gzip_ref_system || echo ./bin/gzip_ref,./bin/gzip_ref_132)
 
 # Heavy fuzz cross-check: official-zlib referee vs pure Go, byte-for-byte
 # Usage: make fuzz [ITER=2000] [MAXSIZE=2097152] [SEED=1]

@@ -132,10 +132,13 @@ type state struct {
 	heapMax int
 	depth   [2*lCodes + 1]uint8
 
-	// Symbol buffer: in C, sym_buf shares the same memory as pending_buf
-	// (3 bytes/symbol); here it is split into two equivalent arrays with the same capacity semantics
-	symDist [litBufsize]uint16
-	symLc   [litBufsize]byte
+	// Symbol storage: layout selected at build time (sym_split.go is the
+	// default, speed-first; sym_lowmem.go behind the gziplowmem tag is
+	// C's pending_buf overlay, 48KB smaller per state). Both record the
+	// identical (dist, lc) stream with identical flush points, so the
+	// output bytes are the same — the LIT_MEM decision record lives in
+	// CLAUDE.md with the measured numbers.
+	symArea
 	symNext int // number of buffered symbols; the block is flushed at symEnd
 	matches int
 
