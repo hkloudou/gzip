@@ -199,25 +199,25 @@ Level 6, each op is a full compression (reset + deflate + CRC + gzip framing); e
 
 | Input | C++ zlib 1.3.1 | C++ zlib 1.3.2 | Pure Go | Std Go | Pure Go / C++ zlib 1.3.1 | Pure Go / C++ zlib 1.3.2 | Pure Go / Std Go |
 |---|---|---|---|---|---|---|---|
-| 2 B | 2.2 µs/op | 2.3 µs/op | 2.8 µs/op | 14.6 µs/op | 0.78× | 0.83× | **5.27× faster** |
-| 198 B JSON token | 6.8 µs/op | 7.0 µs/op | 7.9 µs/op | 22.6 µs/op | 0.87× | 0.88× | **2.87× faster** |
-| 2 KB JSON | 8.1 µs/op | 8.4 µs/op | 7.7 µs/op | 21.9 µs/op | 1.05× | 1.08× | **2.83× faster** |
-| 64 KB JSON | 192.4 µs (341 MB/s) | 238.9 µs (274 MB/s) | 130.1 µs (504 MB/s) | 159.4 µs (411 MB/s) | **1.48× faster** | **1.84× faster** | **1.22× faster** |
-| 1 MB JSON | 8.1 ms (129 MB/s) | 8.3 ms (127 MB/s) | 6.8 ms (155 MB/s) | 6.0 ms (173 MB/s) | **1.20× faster** | **1.22× faster** | 0.89× |
-| 1 MB random (incompressible) | 24.3 ms (43 MB/s) | 24.5 ms (43 MB/s) | 21.9 ms (48 MB/s) | 15.5 ms (68 MB/s) | 1.11× | 1.12× | 0.71× |
+| 2 B | 1.9 µs/op | 2.0 µs/op | 2.4 µs/op | 12.7 µs/op | 0.78× | 0.83× | **5.26× faster** |
+| 198 B JSON token | 6.0 µs/op | 6.1 µs/op | 6.9 µs/op | 20.0 µs/op | 0.86× | 0.89× | **2.90× faster** |
+| 2 KB JSON | 7.2 µs/op | 7.6 µs/op | 6.9 µs/op | 19.5 µs/op | 1.04× | 1.09× | **2.81× faster** |
+| 64 KB JSON | 170.1 µs (385 MB/s) | 216.8 µs (302 MB/s) | 114.4 µs (573 MB/s) | 140.7 µs (466 MB/s) | **1.49× faster** | **1.89× faster** | **1.23× faster** |
+| 1 MB JSON | 7.1 ms (148 MB/s) | 7.1 ms (148 MB/s) | 6.0 ms (176 MB/s) | 5.3 ms (197 MB/s) | **1.19× faster** | **1.19× faster** | 0.89× |
+| 1 MB random (incompressible) | 21.4 ms (49 MB/s) | 21.5 ms (49 MB/s) | 19.9 ms (53 MB/s) | 13.9 ms (75 MB/s) | 1.08× | 1.08× | 0.70× |
 
 **Memory** (Go heap per op; the native referee is a subprocess and has no Go heap; Std Go compresses into a reused bytes.Buffer while Pure Go returns a fresh exact-size slice per op):
 
 | Input | Pure Go | Std Go |
 |---|---|---|
-| 2 B | 24 B · 1 allocs | 0 B · 0 allocs |
+| 2 B | 25 B · 1 allocs | 0 B · 0 allocs |
 | 198 B JSON token | 209 B · 1 allocs | 0 B · 0 allocs |
-| 2 KB JSON | 97 B · 1 allocs | 0 B · 0 allocs |
-| 64 KB JSON | 309 B · 1 allocs | 0 B · 0 allocs |
-| 1 MB JSON | 144.6 KB · 1 allocs | 0 B · 0 allocs |
-| 1 MB random (incompressible) | 1.1 MB · 1 allocs | 0 B · 0 allocs |
+| 2 KB JSON | 96 B · 1 allocs | 0 B · 0 allocs |
+| 64 KB JSON | 307 B · 1 allocs | 0 B · 0 allocs |
+| 1 MB JSON | 156.3 KB · 1 allocs | 0 B · 0 allocs |
+| 1 MB random (incompressible) | 1.0 MB · 1 allocs | 0 B · 0 allocs |
 
-*2026-07-17 02:47 UTC · INTEL(R) XEON(R) PLATINUM 8573C · go 1.26.5 · linux/amd64 · commit `04bb928` (auto-updated by CI on push to main)*
+*2026-07-17 03:02 UTC · INTEL(R) XEON(R) PLATINUM 8573C · go 1.26.5 · linux/amd64 · commit `d110933` (auto-updated by CI on push to main)*
 <!-- AUTOBENCH:END -->
 
 The standard-library column is performance-only context — its output bytes
