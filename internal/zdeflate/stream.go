@@ -39,8 +39,15 @@ const streamChunk = 1 << 18 // 256KB
 // one this way for zero per-stream allocations. Not safe for concurrent
 // use.
 type Deflater struct {
-	s      *state
-	closed bool
+	s *state
+	// scratch is the output buffer, held between Deflate calls for the
+	// life of the stream (released to the pool by Close) so per-call pool
+	// traffic disappears from the streaming path. Buffer identity and
+	// stale contents cannot affect output bytes: every call rewrites
+	// out[:n] from outPos=0 and writes only that prefix — exactly the
+	// same contract pooled (dirty) buffers already have.
+	scratch *[]byte
+	closed  bool
 }
 
 // Init (re)arms a Deflater for a new stream, taking compressor state from
@@ -100,8 +107,14 @@ func (d *Deflater) Deflate(p []byte, flush int, w io.Writer) error {
 		}
 
 		need := Bound(len(chunk)+2*wSize) + 64
-		op := getScratch(need)
-		out := *op
+		if d.scratch == nil {
+			d.scratch = getScratch(need)
+		} else if cap(*d.scratch) < need {
+			*d.scratch = make([]byte, need)
+		} else {
+			*d.scratch = (*d.scratch)[:need]
+		}
+		out := *d.scratch
 		s.in = chunk
 		s.inPos = 0
 		s.out = out
@@ -118,7 +131,6 @@ func (d *Deflater) Deflate(p []byte, flush int, w io.Writer) error {
 			if s.inPos == before {
 				s.in = nil
 				s.out = nil
-				putScratch(op)
 				return errors.New("zdeflate: internal error: no progress")
 			}
 		}
@@ -128,11 +140,9 @@ func (d *Deflater) Deflate(p []byte, flush int, w io.Writer) error {
 		s.out = nil
 		if n > 0 {
 			if _, err := w.Write(out[:n]); err != nil {
-				putScratch(op)
 				return err
 			}
 		}
-		putScratch(op)
 	}
 	return nil
 }
@@ -145,6 +155,10 @@ func (d *Deflater) Close() error {
 		return nil
 	}
 	d.closed = true
+	if d.scratch != nil {
+		putScratch(d.scratch)
+		d.scratch = nil
+	}
 	s := d.s
 	d.s = nil
 	if s == nil {
