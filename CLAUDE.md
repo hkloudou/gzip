@@ -103,7 +103,9 @@ with benchstat on free x86-64 and arm64 runners.
 
 Changes go through PRs; wait for the Codex review and judge each of its
 comments on the merits (fix what is valid, push back with reasons on what
-is not), then merge once CI is green. App-created PRs have been observed
+is not), then merge once CI is green. Codex's repo instructions live in
+`AGENTS.md` (review focus + always-comment-a-verdict behavior) — keep it
+consistent with this file when rules change. App-created PRs have been observed
 both to trigger and not to trigger `pull_request` workflow runs — if no
 run appears, trigger ci.yml on the branch via `workflow_dispatch`; either
 way, confirm a green run for the branch's HEAD commit before merging and
