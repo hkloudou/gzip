@@ -200,12 +200,12 @@ Level 6, each op is a full compression (reset + deflate + CRC + gzip framing); e
 
 | Input | C++ zlib 1.3.1 | C++ zlib 1.3.2 | Pure Go | Std Go | Pure Go / C++ zlib 1.3.1 | Pure Go / C++ zlib 1.3.2 | Pure Go / Std Go |
 |---|---|---|---|---|---|---|---|
-| 2 B | 1.7 µs/op | 1.8 µs/op | 2.2 µs/op | 12.3 µs/op | 0.78× | 0.81× | **5.50× faster** |
-| 198 B JSON token | 7.5 µs/op | 7.5 µs/op | 7.9 µs/op | 21.8 µs/op | 0.94× | 0.94× | **2.75× faster** |
-| 2 KB JSON | 14.8 µs/op | 11.4 µs/op | 8.5 µs/op | 20.7 µs/op | **1.74× faster** | **1.34× faster** | **2.43× faster** |
-| 64 KB JSON | 455.0 µs (144 MB/s) | 309.8 µs (212 MB/s) | 162.7 µs (403 MB/s) | 182.4 µs (359 MB/s) | **2.80× faster** | **1.90× faster** | 1.12× |
-| 1 MB JSON | 11.4 ms (92 MB/s) | 10.3 ms (102 MB/s) | 7.4 ms (141 MB/s) | 7.2 ms (146 MB/s) | **1.54× faster** | **1.38× faster** | 0.96× |
-| 1 MB random (incompressible) | 23.8 ms (44 MB/s) | 24.1 ms (43 MB/s) | 21.0 ms (50 MB/s) | 18.3 ms (57 MB/s) | 1.14× | 1.15× | 0.87× |
+| 2 B | 1.7 µs/op | 1.9 µs/op | 2.5 µs/op | 9.1 µs/op | 0.68× | 0.75× | **3.67× faster** |
+| 198 B JSON token | 7.2 µs/op | 7.2 µs/op | 8.1 µs/op | 18.5 µs/op | 0.89× | 0.89× | **2.27× faster** |
+| 2 KB JSON | 13.4 µs/op | 8.9 µs/op | 7.9 µs/op | 17.6 µs/op | **1.70× faster** | 1.12× | **2.23× faster** |
+| 64 KB JSON | 232.6 µs (282 MB/s) | 282.4 µs (232 MB/s) | 140.5 µs (467 MB/s) | 178.7 µs (367 MB/s) | **1.66× faster** | **2.01× faster** | **1.27× faster** |
+| 1 MB JSON | 9.2 ms (113 MB/s) | 9.4 ms (112 MB/s) | 7.0 ms (149 MB/s) | 7.1 ms (147 MB/s) | **1.32× faster** | **1.34× faster** | 1.01× |
+| 1 MB random (incompressible) | 27.4 ms (38 MB/s) | 27.2 ms (38 MB/s) | 22.4 ms (47 MB/s) | 17.9 ms (59 MB/s) | **1.22× faster** | **1.21× faster** | 0.80× |
 
 **Memory** (Go heap per op; the native referee is a subprocess and has no Go heap. Both Go columns do the same job — compressor state and buffers are reused, and each op delivers a fresh exact-size result slice):
 
@@ -214,11 +214,11 @@ Level 6, each op is a full compression (reset + deflate + CRC + gzip framing); e
 | 2 B | 24 B · 1 allocs | 32 B · 1 allocs |
 | 198 B JSON token | 209 B · 1 allocs | 208 B · 1 allocs |
 | 2 KB JSON | 97 B · 1 allocs | 96 B · 1 allocs |
-| 64 KB JSON | 315 B · 1 allocs | 288 B · 1 allocs |
-| 1 MB JSON | 154.8 KB · 1 allocs | 136.0 KB · 1 allocs |
-| 1 MB random (incompressible) | 1.0 MB · 1 allocs | 1.0 MB · 1 allocs |
+| 64 KB JSON | 335 B · 1 allocs | 288 B · 1 allocs |
+| 1 MB JSON | 144.9 KB · 1 allocs | 136.0 KB · 1 allocs |
+| 1 MB random (incompressible) | 1.1 MB · 1 allocs | 1.0 MB · 1 allocs |
 
-*2026-07-17 03:58 UTC · AMD EPYC 7763 64-Core Processor · go 1.26.5 · linux/amd64 · commit `d9bbd76` (auto-updated by CI on push to main)*
+*2026-07-17 04:37 UTC · AMD EPYC 9V74 80-Core Processor · go 1.26.5 · linux/amd64 · commit `e7dda45` (auto-updated by CI on push to main)*
 <!-- AUTOBENCH:END -->
 
 The standard-library column is performance-only context — its output bytes
@@ -229,11 +229,11 @@ differ by design, which is the reason this library exists.
 <!-- AUTOLOC:BEGIN -->
 | Category | Files | Go lines |
 |---|---|---|
-| Product (root package + internal/zdeflate, pure Go) | 7 | 2514 |
+| Product (root package + internal/zdeflate, pure Go) | 9 | 2557 |
 | Tests (*_test.go) | 11 | 2298 |
 | Test infrastructure (cmd/crossnative, non-test) | 1 | 860 |
 
-*(tests + infrastructure) : product ≈ 1.3 : 1 (the C++ referee tool is not Go code and is not counted; auto-updated by CI on push to main)*
+*(tests + infrastructure) : product ≈ 1.2 : 1 (the C++ referee tool is not Go code and is not counted; auto-updated by CI on push to main)*
 <!-- AUTOLOC:END -->
 
 ## Memory notes
