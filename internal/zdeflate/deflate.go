@@ -317,8 +317,9 @@ func (s *state) insertPos(str int) {
 }
 
 // insertRun performs insertPos(str) for str = first..last (inclusive,
-// no-op when last < first) — the proven-hot batch-insert loop of
-// deflateFast/deflateSlow. Instead of three window byte loads per position,
+// no-op when last < first) — deflateSlow's proven-hot batch-insert loop,
+// selected on arm64 only (wideInsertRun, see insert_arm64.go for the A/B
+// data). Instead of three window byte loads per position,
 // one 8-byte little-endian load sources six consecutive hashes: byte k of
 // load64w(&s.window, str) is window[str+k] (both load flavors are
 // little-endian), so each hK below is literally hash3(str+k) — the same
@@ -870,12 +871,14 @@ func deflateSlow(s *state, flush int) blockState {
 
 			// Insert into the hash table all strings covered by the match:
 			// positions strstart+1 .. strstart+prevLength-2, capped at
-			// maxInsert — exactly the set C's rolling loop inserts.
-			// insertRun computes each hash independently so the inserts do
-			// not serialize on ins_h; insH is then set to hash3(last
-			// inserted), the value C's ins_h holds after its loop. If every
-			// position was skipped (last < first), C leaves ins_h untouched
-			// and so does this path.
+			// maxInsert — exactly the set C's rolling loop inserts. Both
+			// arms compute each hash independently so the inserts do not
+			// serialize on ins_h; insH is then set to hash3(last inserted),
+			// the value C's ins_h holds after its loop. If every position
+			// was skipped (last < first), C leaves ins_h untouched and so
+			// does this path. wideInsertRun is a compile-time constant
+			// (insert_arm64.go / insert_other.go, chosen from A/B CI data),
+			// so each build keeps exactly one arm.
 			s.lookahead -= s.prevLength - 1
 			end := s.strstart + s.prevLength - 2
 			first := s.strstart + 1
@@ -883,7 +886,13 @@ func deflateSlow(s *state, flush int) blockState {
 			if last > maxInsert {
 				last = maxInsert
 			}
-			s.insertRun(first, last)
+			if wideInsertRun {
+				s.insertRun(first, last)
+			} else {
+				for str := first; str <= last; str++ {
+					s.insertPos(str)
+				}
+			}
 			if last >= first {
 				s.insH = s.hash3(last)
 			}
