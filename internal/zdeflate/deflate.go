@@ -132,10 +132,19 @@ type state struct {
 	heapMax int
 	depth   [2*lCodes + 1]uint8
 
-	// Symbol buffer: in C, sym_buf shares the same memory as pending_buf
-	// (3 bytes/symbol); here it is split into two equivalent arrays with the same capacity semantics
-	symDist [litBufsize]uint16
-	symLc   [litBufsize]byte
+	// Symbol buffer: exactly C's non-LIT_MEM layout — sym_buf IS the top
+	// three quarters of pending_buf (3 bytes per symbol at offset
+	// litBufsize + 3*symNext: dist-low, dist-high, lc). Safety is zlib's
+	// own overlay invariant (deflate.c, "We overlay pending_buf and
+	// sym_buf"): the longest fixed-code length/distance pair emits 31 bits
+	// while its stored form is 24 bits, and sym_buf starts 8*litBufsize
+	// bits in, so the compressed bits trail the unread symbols by at least
+	// 139 bits at all times; dynamic blocks are only ever chosen when
+	// smaller than the fixed encoding, so the same bound covers them. Our
+	// 64-bit accumulator only widens that margin: bits park in the
+	// accumulator and reach pendingBuf in whole 4/6-byte groups, so the
+	// write position is never past ceil(emitted_bits/8), at most 7 bits
+	// beyond C's bit-exact write position — well inside the 139-bit slack.
 	symNext int // number of buffered symbols; the block is flushed at symEnd
 	matches int
 

@@ -648,11 +648,10 @@ func (s *state) trStoredBlock(buf []byte, last bool) {
 func (s *state) compressBlock(ltree, dtree []ctData) {
 	buf, valid, pending := s.biBuf, s.biValid, s.pending
 	if s.symNext != 0 {
-		symLc := s.symLc[:s.symNext]
-		symDist := s.symDist[:s.symNext]
-		for sx, lcb := range symLc {
-			dist := int(symDist[sx])
-			lc := int(lcb)
+		symBuf := s.pendingBuf[litBufsize : litBufsize+3*s.symNext]
+		for sx := 0; sx < len(symBuf); sx += 3 {
+			dist := int(symBuf[sx]) | int(symBuf[sx+1])<<8
+			lc := int(symBuf[sx+2])
 			if dist == 0 {
 				e := ltree[lc] // literal
 				buf |= uint64(e.fc) << uint(valid)
@@ -740,19 +739,26 @@ func (s *state) trFlushBlock(buf []byte, storedLen int, last bool) {
 	}
 }
 
-// tallyLit corresponds to the _tr_tally_lit macro; returns whether the block must be flushed
+// tallyLit corresponds to the _tr_tally_lit macro; returns whether the block
+// must be flushed. Symbols live inside pendingBuf exactly as in C (see the
+// overlay comment on the state struct): base = litBufsize + 3*symNext.
 func (s *state) tallyLit(c byte) bool {
-	s.symDist[s.symNext] = 0
-	s.symLc[s.symNext] = c
+	base := litBufsize + 3*s.symNext
+	s.pendingBuf[base] = 0
+	s.pendingBuf[base+1] = 0
+	s.pendingBuf[base+2] = c
 	s.symNext++
 	s.dynLtree[c].fc++
 	return s.symNext == symEnd
 }
 
-// tallyDist corresponds to the _tr_tally_dist macro
+// tallyDist corresponds to the _tr_tally_dist macro (byte order as in C:
+// dist-low, dist-high, lc)
 func (s *state) tallyDist(distance, length int) bool {
-	s.symDist[s.symNext] = uint16(distance)
-	s.symLc[s.symNext] = byte(length)
+	base := litBufsize + 3*s.symNext
+	s.pendingBuf[base] = byte(distance)
+	s.pendingBuf[base+1] = byte(distance >> 8)
+	s.pendingBuf[base+2] = byte(length)
 	s.symNext++
 	dist := distance - 1
 	s.dynLtree[int(lengthCode[length])+literals+1].fc++
