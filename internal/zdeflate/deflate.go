@@ -520,6 +520,26 @@ func (s *state) longestMatch(curMatch int) int {
 	if s.strstart > maxDistance {
 		limit = s.strstart - maxDistance
 	}
+	if asmLongestMatch {
+		// Same reductions the Go loop applies below, then the transcribed
+		// chain loop in assembly (lm_amd64.s) — byte-identical semantics,
+		// gated per architecture by A/B data (lm_asm_*.go).
+		if s.prevLength >= s.goodMatch {
+			chainLength >>= 2
+		}
+		if niceMatch > s.lookahead {
+			niceMatch = s.lookahead
+		}
+		length, start := longestMatchAsm(&s.window[0], &s.prev[0],
+			curMatch, scan, bestLen, chainLength, niceMatch, limit)
+		if start >= 0 {
+			s.matchStart = start
+		}
+		if length <= s.lookahead {
+			return length
+		}
+		return s.lookahead
+	}
 	win := &s.window
 	prev := &s.prev
 
